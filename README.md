@@ -101,8 +101,15 @@ See [`docs/DEV_SETUP.md`](docs/DEV_SETUP.md) for full SUMO setup and test detail
 
 MIT. See [`LICENSE`](LICENSE).
 
-## External Runtime
+## Credits and Citation
 
-SumoGUIMac does not bundle or redistribute SUMO binaries or SUMO source code. It talks to a user-installed [Eclipse SUMO](https://eclipse.dev/sumo/) runtime over TraCI. SUMO is licensed separately by its maintainers.
+SumoGUIMac builds on the ecosystem around [Eclipse SUMO](https://eclipse.dev/sumo/) ("Simulation of Urban MObility"), the open-source microscopic traffic simulation package used as the external simulation runtime for this app.
 
-This project is **not** affiliated with the SUMO maintainers.
+Eclipse SUMO is mainly developed by employees of the [Institute of Transportation Systems at the German Aerospace Center (DLR)](https://www.dlr.de/ts/en/). Please credit and cite the SUMO project when using SumoGUIMac for research, publications, demos, or derived work:
+
+- Eclipse SUMO project: <https://github.com/eclipse-sumo/sumo>
+- SUMO documentation: <https://sumo.dlr.de/docs>
+- SUMO DOI: [10.5281/zenodo.18406080](https://doi.org/10.5281/zenodo.18406080)
+- SUMO license: [Eclipse Public License 2.0](https://www.eclipse.org/legal/epl-2.0/)
+
+SumoGUIMac does not bundle or redistribute SUMO binaries or SUMO source code. It talks to a user-installed SUMO runtime over TraCI. This project is **not** affiliated with or endorsed by the SUMO maintainers.
