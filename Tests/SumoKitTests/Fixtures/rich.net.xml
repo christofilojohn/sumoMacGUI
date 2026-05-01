@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<net version="1.20">
+    <location netOffset="0.00,0.00" convBoundary="0.00,-20.00,100.00,20.00" origBoundary="0.00,-20.00,100.00,20.00" projParameter="!"/>
+
+    <edge id="a" from="j0" to="j1" priority="1">
+        <lane id="a_0" index="0" speed="13.89" length="50.00" width="3.20" shape="0.00,0.00 50.00,0.00"/>
+    </edge>
+    <edge id="b" from="j1" to="j2" priority="1">
+        <lane id="b_0" index="0" speed="13.89" length="50.00" width="3.20" shape="50.00,0.00 100.00,0.00"/>
+    </edge>
+
+    <junction id="j0" type="dead_end" x="0.00" y="0.00" incLanes="" intLanes="" shape="-1.00,-1.00 1.00,-1.00 1.00,1.00 -1.00,1.00"/>
+    <junction id="j1" type="traffic_light" x="50.00" y="0.00" incLanes="a_0" intLanes=":j1_0_0" shape="49.00,-1.00 51.00,-1.00 51.00,1.00 49.00,1.00"/>
+    <junction id="j2" type="dead_end" x="100.00" y="0.00" incLanes="b_0" intLanes="" shape="99.00,-1.00 101.00,-1.00 101.00,1.00 99.00,1.00"/>
+
+    <tlLogic id="j1" type="static" programID="0" offset="3">
+        <phase duration="31" minDur="10" maxDur="60" state="Gr"/>
+        <phase duration="4" state="yr"/>
+    </tlLogic>
+
+    <connection from="a" to="b" fromLane="0" toLane="0" tl="j1" linkIndex="0" dir="s" state="O"/>
+    <roundabout nodes="j0 j1 j2" edges="a b"/>
+</net>

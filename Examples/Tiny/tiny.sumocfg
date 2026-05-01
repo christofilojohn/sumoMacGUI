@@ -1,0 +1,10 @@
+<configuration>
+  <input>
+    <net-file value="tiny.net.xml"/>
+    <route-files value="tiny.rou.xml"/>
+  </input>
+  <time>
+    <begin value="0"/>
+    <end value="60"/>
+  </time>
+</configuration>
