@@ -14,7 +14,7 @@ A native macOS port of [Eclipse SUMO](https://eclipse.dev/sumo/)'s `sumo-gui` â€
 
 ## Why
 
-`sumo-gui` works, but it's a FOX-toolkit/OpenGL app that doesn't feel native on macOS. This is a from-scratch SwiftUI rewrite that talks to the same SUMO engine over TraCI, so any existing `.sumocfg` Just Works.
+`sumo-gui` works with some severe visual issues and lacks a lot of the functionalities of a native mac app. It's a FOX-toolkit/OpenGL app that doesn't feel native on macOS. This is a from-scratch SwiftUI rewrite that talks to the same SUMO engine over TraCI, so any existing `.sumocfg` Just Works.
 
 ## Goals
 
