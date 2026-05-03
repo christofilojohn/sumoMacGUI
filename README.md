@@ -12,6 +12,14 @@ A native macOS port of [Eclipse SUMO](https://eclipse.dev/sumo/)'s `sumo-gui` â€
 
 > **Status: pre-alpha.** The engine core builds and the native app can open `.sumocfg`, launch SUMO, step/play, render lanes/junctions/live vehicles in Metal, and inspect selected vehicles or edges. Track real progress in [`docs/CHECKLIST.md`](docs/CHECKLIST.md).
 
+<p align="center">
+  <img src="assets/sumoguimac-flowdemo-running.png" alt="SumoGUIMac running the included FlowDemo SUMO scenario on macOS" width="900">
+</p>
+
+<p align="center">
+  <sub>SumoGUIMac running <code>Examples/FlowDemo/flowdemo.sumocfg</code> with live vehicles, lane coloring, inspector metrics, and playback controls.</sub>
+</p>
+
 ## Why
 
 `sumo-gui` works with some severe visual issues and lacks a lot of the functionalities of a native mac app. It's a FOX-toolkit/OpenGL app that doesn't feel native on macOS. This is a from-scratch SwiftUI rewrite that talks to the same SUMO engine over TraCI, so any existing `.sumocfg` Just Works.
