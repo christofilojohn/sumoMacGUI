@@ -111,6 +111,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var lastLaneLODScale: Float?
     private var vehicleInstanceBuffer: MTLBuffer?
     private var vehicleInstanceCount = 0
+    private var vehicleInstanceCapacity = 0
     private var lastVehicleLODScale: Float?
     private var lastDragLocation: CGPoint?
     private var mouseDownLocation: CGPoint?
@@ -524,7 +525,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             encoder.setRenderPipelineState(pipeline)
             encoder.setVertexBuffer(vehicleInstanceBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
-            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: vehicleInstanceCount)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 9, instanceCount: vehicleInstanceCount)
         }
 
         encoder.endEncoding()
@@ -1141,8 +1142,15 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private func updateVehicleBuffer(samples: [VehicleRenderSample], scale: Float? = nil) {
         let renderScale = scale ?? currentRenderScale()
         lastVehicleLODScale = renderScale
-        guard let device, samples.isEmpty == false else {
+        guard let device else {
             vehicleInstanceBuffer = nil
+            vehicleInstanceCount = 0
+            vehicleInstanceCapacity = 0
+            metalView.setNeedsDisplay(bounds)
+            return
+        }
+
+        guard samples.isEmpty == false, let size = RenderLOD.vehicleScreenSize(scale: renderScale) else {
             vehicleInstanceCount = 0
             metalView.setNeedsDisplay(bounds)
             return
@@ -1151,9 +1159,6 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         var instances: [VehicleInstance] = []
         instances.reserveCapacity(samples.count)
         for vehicle in samples {
-            guard let size = RenderLOD.vehicleScreenSize(scale: renderScale) else {
-                continue
-            }
             let isSelected = vehicle.id == selectedVehicleID || selectedVehicleIDs.contains(vehicle.id)
             let color = isSelected ? selectedVehicleColor() : vehicleColor(for: vehicle)
             instances.append(VehicleInstance(
@@ -1164,12 +1169,25 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
         vehicleInstanceCount = instances.count
         guard instances.isEmpty == false else {
-            vehicleInstanceBuffer = nil
             metalView.setNeedsDisplay(bounds)
             return
         }
-        vehicleInstanceBuffer = instances.withUnsafeBytes { bytes in
-            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+
+        if vehicleInstanceBuffer == nil || vehicleInstanceCapacity < instances.count {
+            let nextCapacity = max(instances.count, max(vehicleInstanceCapacity * 2, 256))
+            vehicleInstanceBuffer = device.makeBuffer(
+                length: nextCapacity * MemoryLayout<VehicleInstance>.stride,
+                options: .storageModeShared
+            )
+            vehicleInstanceCapacity = nextCapacity
+        }
+
+        if let vehicleInstanceBuffer {
+            instances.withUnsafeBytes { bytes in
+                if let baseAddress = bytes.baseAddress {
+                    vehicleInstanceBuffer.contents().copyMemory(from: baseAddress, byteCount: bytes.count)
+                }
+            }
         }
         metalView.setNeedsDisplay(bounds)
     }
@@ -1419,6 +1437,56 @@ enum RenderLOD {
     }
 }
 
+enum VehicleHeading {
+    static func screenRadians(sumoDegrees: Float, viewportRotationRadians: Float) -> Float {
+        ((sumoDegrees - 90) * .pi / 180) - viewportRotationRadians
+    }
+
+    static func sumoDegrees(from source: SIMD2<Float>, to target: SIMD2<Float>) -> Float? {
+        let delta = target - source
+        guard simd_length_squared(delta) > 0.0001 else { return nil }
+        return normalizedDegrees(atan2(delta.x, delta.y) * 180 / .pi)
+    }
+
+    static func interpolatedSUMODegrees(
+        from sourceAngle: Float,
+        to targetAngle: Float,
+        sourcePosition: SIMD2<Float>,
+        targetPosition: SIMD2<Float>,
+        progress: Float
+    ) -> Float {
+        let clamped = max(0, min(progress, 1))
+        let baseAngle = mixDegrees(sourceAngle, targetAngle, progress: clamped)
+        guard let movementAngle = sumoDegrees(from: sourcePosition, to: targetPosition) else {
+            return baseAngle
+        }
+
+        let midTurnWeight = sin(clamped * .pi)
+        return mixDegrees(baseAngle, movementAngle, progress: min(midTurnWeight * 0.65, 0.65))
+    }
+
+    static func mixDegrees(_ source: Float, _ target: Float, progress: Float) -> Float {
+        let clamped = max(0, min(progress, 1))
+        return normalizedDegrees(source + shortestDeltaDegrees(from: source, to: target) * clamped)
+    }
+
+    static func shortestDeltaDegrees(from source: Float, to target: Float) -> Float {
+        var delta = normalizedDegrees(target) - normalizedDegrees(source)
+        while delta > 180 { delta -= 360 }
+        while delta < -180 { delta += 360 }
+        return delta
+    }
+
+    private static func normalizedDegrees(_ degrees: Float) -> Float {
+        guard degrees.isFinite else { return 0 }
+        var normalized = degrees.truncatingRemainder(dividingBy: 360)
+        if normalized < 0 {
+            normalized += 360
+        }
+        return normalized
+    }
+}
+
 private func screenDistance(from a: CGPoint, to b: CGPoint) -> CGFloat {
     let dx = a.x - b.x
     let dy = a.y - b.y
@@ -1486,13 +1554,16 @@ private struct VehicleRenderSample {
 
     func interpolated(to target: VehicleRenderSample, progress: Float) -> VehicleRenderSample {
         let clamped = max(0, min(progress, 1))
-        var angleDelta = target.angle - angle
-        while angleDelta > 180 { angleDelta -= 360 }
-        while angleDelta < -180 { angleDelta += 360 }
         return VehicleRenderSample(
             id: target.id,
             position: position + (target.position - position) * clamped,
-            angle: angle + angleDelta * clamped,
+            angle: VehicleHeading.interpolatedSUMODegrees(
+                from: angle,
+                to: target.angle,
+                sourcePosition: position,
+                targetPosition: target.position,
+                progress: clamped
+            ),
             speed: speed + (target.speed - speed) * clamped,
             typeID: target.typeID,
             acceleration: interpolateOptional(acceleration, target.acceleration, progress: clamped),
@@ -1694,15 +1765,15 @@ vertex BackgroundVertexOut backgroundVertex(
     const device BackgroundRenderVertex *vertices [[buffer(0)]],
     constant LaneViewportUniforms &uniforms [[buffer(1)]]
 ) {
-    const BackgroundRenderVertex vertex = vertices[vertexID];
-    const float2 world = float2(vertex.position);
+    const BackgroundRenderVertex backgroundVertexData = vertices[vertexID];
+    const float2 world = float2(backgroundVertexData.position);
     const float2 size = uniforms.viewport.xy;
     const float2 screen = worldToScreen(world, uniforms);
 
     BackgroundVertexOut out;
     out.position = screenToClip(screen, size);
-    out.texCoord = float2(vertex.texCoord);
-    out.tint = vertex.tint;
+    out.texCoord = float2(backgroundVertexData.texCoord);
+    out.tint = backgroundVertexData.tint;
     return out;
 }
 
@@ -1798,23 +1869,46 @@ vertex VehicleVertexOut vehicleVertex(
     const VehicleInstance vehicle = vehicles[instanceID];
     const float2 size = uniforms.viewport.xy;
     const float2 world = vehicle.pose.xy;
-    const float angle = (90.0 - vehicle.pose.z) * 0.01745329252 + uniforms.camera.w;
+    const float angle = (vehicle.pose.z - 90.0) * 0.01745329252 - uniforms.camera.w;
     const float2 forward = float2(cos(angle), sin(angle));
     const float2 right = float2(-forward.y, forward.x);
     const float length = clamp(vehicle.metrics.x, 2.0, 34.0);
     const float width = clamp(vehicle.metrics.y, 1.0, 14.0);
     const float2 screenCenter = worldToScreen(world, uniforms);
+    const float2 nose = screenCenter + forward * (length * 0.58);
+    const float2 frontRight = screenCenter + forward * (length * 0.14) + right * (width * 0.52);
+    const float2 rearRight = screenCenter - forward * (length * 0.44) + right * (width * 0.42);
+    const float2 rearLeft = screenCenter - forward * (length * 0.44) - right * (width * 0.42);
+    const float2 frontLeft = screenCenter + forward * (length * 0.14) - right * (width * 0.52);
 
     float2 screen;
     switch (vertexID) {
     case 0:
-        screen = screenCenter + forward * (length * 0.58);
+        screen = nose;
         break;
     case 1:
-        screen = screenCenter - forward * (length * 0.42) - right * (width * 0.5);
+        screen = frontRight;
+        break;
+    case 2:
+        screen = frontLeft;
+        break;
+    case 3:
+        screen = frontRight;
+        break;
+    case 4:
+        screen = rearRight;
+        break;
+    case 5:
+        screen = rearLeft;
+        break;
+    case 6:
+        screen = frontRight;
+        break;
+    case 7:
+        screen = rearLeft;
         break;
     default:
-        screen = screenCenter - forward * (length * 0.42) + right * (width * 0.5);
+        screen = frontLeft;
         break;
     }
 
