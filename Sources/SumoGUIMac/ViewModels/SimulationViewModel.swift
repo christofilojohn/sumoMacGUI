@@ -755,6 +755,10 @@ final class SimulationViewModel: ObservableObject {
         resetPlaybackSpeed()
     }
 
+    func terminateRunningSessionForTesting() async {
+        await session?.disconnectAfterFailure()
+    }
+
     func stop() async {
         isPlaying = false
         playTask?.cancel()
@@ -1059,11 +1063,25 @@ final class SimulationViewModel: ObservableObject {
                 }
             }
         } catch {
-            runtimeMessage = "Simulation step failed: \(error.localizedDescription)"
+            runtimeMessage = "Simulation disconnected: \(error.localizedDescription)"
             isPlaying = false
             playTask?.cancel()
             playTask = nil
+            viewportSubscriptionTask?.cancel()
+            viewportSubscriptionTask = nil
+            vehicleUpdateModeTask?.cancel()
+            vehicleUpdateModeTask = nil
+            self.session = nil
+            liveState = SimulationState(simTime: liveState.simTime)
+            selectedVehicleID = nil
+            selectedVehicleIDs = []
+            selectedRouteEdgeIDs = []
+            vehicleRouteCache = [:]
+            vehicleRouteOrderCache = [:]
+            laneOccupancyByID = [:]
+            clearHoverRoutePreview()
             resetPlaybackSpeed()
+            await session.disconnectAfterFailure()
         }
     }
 

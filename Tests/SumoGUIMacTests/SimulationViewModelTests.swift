@@ -386,6 +386,29 @@ final class SimulationViewModelTests: XCTestCase {
         XCTAssertGreaterThan(viewModel.liveState.simTime, runningTime, "step should continue the same simulation after stop")
     }
 
+    func testKilledSUMOSessionDisconnectsCleanly() async throws {
+        guard SumoLauncher.locateBinary() != nil else {
+            throw XCTSkip("SUMO not installed")
+        }
+
+        let config = try makeTinyScenario()
+        let viewModel = SimulationViewModel()
+
+        await viewModel.load(url: config)
+        XCTAssertTrue(viewModel.canRunSimulation)
+
+        await viewModel.stepOnceNow()
+        XCTAssertGreaterThanOrEqual(viewModel.liveState.simTime, 0)
+
+        await viewModel.terminateRunningSessionForTesting()
+        await viewModel.stepOnceNow()
+
+        XCTAssertFalse(viewModel.canRunSimulation)
+        XCTAssertFalse(viewModel.isPlaying)
+        XCTAssertTrue(viewModel.liveState.vehicles.isEmpty)
+        XCTAssertTrue(viewModel.runtimeMessage?.contains("Simulation disconnected") == true)
+    }
+
     private func makeTinyScenario() throws -> URL {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sumoguiapp-vm-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

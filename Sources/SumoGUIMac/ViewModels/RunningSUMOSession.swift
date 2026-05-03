@@ -257,6 +257,13 @@ final class RunningSUMOSession {
         handle?.terminate()
     }
 
+    func disconnectAfterFailure() async {
+        await connection.close()
+        if !isAttachedToExternalSUMO {
+            handle?.terminate()
+        }
+    }
+
     func terminateImmediately() {
         handle?.terminate()
     }

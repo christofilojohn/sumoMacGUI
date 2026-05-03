@@ -87,12 +87,12 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ## Day 7 — Stability, scale, ship
 
-- [ ] Large benchmark scenario script (OSM import via `osmGet.py`/`netconvert`)
+- [x] Large benchmark scenario script (OSM import via `osmGet.py`/`osmBuild.py`, random-trip route generation, and parser benchmark handoff; 2026-05-03, codex)
 - [ ] Run a large benchmark for 1 hour sim time, profile with Instruments — fix top 3 hot paths
-- [ ] Crash test: kill `sumo` subprocess mid-step, verify UI recovers gracefully
+- [x] Crash test: kill `sumo` subprocess / drop TraCI connection mid-session, verify UI recovers gracefully without leaving a runnable dead session (2026-05-03, codex)
 - [~] Screenshot/video export (PNG export from the current native view is wired; MP4 via AVFoundation pending)
 - [~] Notarization-ready build path (`SumoGUIMacApp` Xcode scheme builds a signed local `.app`; `Scripts/build-alpha-release.sh` creates an ad-hoc signed alpha zip; developer-team signing and notarization still pending)
-- [ ] README with screenshot, install instructions, contributing guide
+- [x] README with screenshot, install instructions, contributing guide (README includes app icon, live FlowDemo screenshot, build/run/release instructions, interaction notes, contribution loop, and SUMO citation/credits; 2026-05-03, codex)
 - [ ] First public tag: `v0.1.0`
 
 ---
@@ -111,8 +111,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ## Handoff state (update at end of every session)
 
-- **Last touched:** 2026-05-03 — codex — Finished Day 6 alpha inspection tooling. Persistent edge/vehicle selection sets, route context actions, breakpoint run-to/double-click jump, tracker charts for global and selected-object variables, and rotate-with-heading vehicle follow are wired and tested.
-- **Next action:** Start Day 7 stability/ship work: run the first GitHub Actions CI pass after pushing, live-smoke external attach with `sumo --remote-port <port> --num-clients 2` and a second controller client, run `NetParseBenchmark` against a large OSM-derived `.net.xml`, then validate the exported `<viewsettings>` against upstream sumo-gui.
+- **Last touched:** 2026-05-03 — codex — Continued Day 7 stability/scale work. Added `Scripts/make-large-benchmark-scenario.sh`, which can download or import OSM data, build a SUMO `.net.xml`, generate large random-trip routes, write a runnable `.sumocfg`, and hand the network to `NetParseBenchmark`. Also hardened failed TraCI step handling so a killed SUMO process leaves the UI in a clean disconnected state.
+- **Next action:** Run the generated large OSM benchmark for one hour of sim time, profile with Instruments, and fix the top hot paths. Also run the first GitHub Actions CI pass after pushing, live-smoke external attach with `sumo --remote-port <port> --num-clients 2` and a second controller client, then validate exported `<viewsettings>` against upstream sumo-gui.
 - **Known blockers:** External attach mode needs a live multi-client SUMO smoke test with the controller at one TraCI order and SumoGUIMac at another. The local active SUMO binary reports 1.25.0 while the app target constant is 1.26.0, so the compatibility guard warns until the local runtime is upgraded or the target is intentionally changed. Tracker charts are embedded in the inspector rather than detached SUMO-style tracker windows, and arbitrary TraCI variable picking is still pending. Visualization XML is SUMO-style but has not yet been validated as byte-for-byte compatible with upstream sumo-gui view settings, and background georeferencing currently supports manual bounds plus adjacent world files rather than native GeoTIFF tags. Release signing is local/ad-hoc only; Developer ID signing and notarization are still pending. Junction triangulation is simple fan triangulation, so unusual concave junction shapes may need a more robust tessellator.
 - **Local SUMO version targeted:** App target = 1.26.0. Current located binary = `/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO/bin/sumo`, which reports 1.25.0. SUMO_HOME for the python tools should point at the matching framework's `share/sumo`.
 

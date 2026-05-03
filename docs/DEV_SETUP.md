@@ -78,6 +78,28 @@ swift run SumoGUIMac -- Examples/Tiny/tiny.sumocfg
 
 Large real-world networks are used as scale benchmarks once the core GUI path works, but they are not required for the basic smoke path.
 
+## Scale benchmark scenario
+
+Generate an Athens, Greece OSM-derived benchmark network and route set under `.build/benchmarks`:
+
+```sh
+Scripts/make-large-benchmark-scenario.sh --preset athens
+```
+
+The script locates the installed SUMO tools, downloads or imports OSM data, builds a `.net.xml` with `osmBuild.py`, generates roughly 50k random trips over one simulated hour with `randomTrips.py`, writes a matching `.sumocfg`, and runs `NetParseBenchmark` against the generated network.
+
+Use your own OSM extract when working offline or benchmarking a dissertation scenario:
+
+```sh
+Scripts/make-large-benchmark-scenario.sh --osm ~/Downloads/city.osm.xml --prefix city-benchmark --vehicles 25000
+```
+
+Open the generated `.sumocfg` in SumoGUIMac for an app-level smoke test, or run the generated `.net.xml` directly through:
+
+```sh
+Scripts/benchmark-net-parse.sh .build/benchmarks/osm-large/sumogui-large.net.xml
+```
+
 ## Attach to an external TraCI run
 
 For controller experiments, including a separate MAPPO scheduler, run SUMO yourself and attach the native app as a viewer:

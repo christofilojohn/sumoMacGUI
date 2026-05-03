@@ -37,9 +37,10 @@ See [`docs/CHECKLIST.md`](docs/CHECKLIST.md) — single source of truth.
 
 ## Requirements
 
-- macOS 14+, Xcode 15+ / Swift 5.9+
+- macOS 14+, Xcode 15.4+ / Swift 5.10+
 - A working Eclipse SUMO install (provides the `sumo` binary used over TraCI). `Scripts/find-sumo.sh` checks common Homebrew / `EclipseSUMO.framework` locations.
 - The included `Examples/Tiny/tiny.sumocfg` is a small smoke scenario for local testing.
+- The included `Examples/FlowDemo/flowdemo.sumocfg` is the better visual smoke test shown in the screenshot.
 
 ## Build & run
 
@@ -71,6 +72,14 @@ swift run SumoGUIMac -- Examples/Tiny/tiny.sumocfg
 ```
 
 The example path is only a smoke-test input. The GUI is intended to open ordinary SUMO `.sumocfg` and `.net.xml` files, not a specific scenario.
+
+For scale testing, generate a larger Athens, Greece OSM-derived scenario under `.build/benchmarks`:
+
+```sh
+Scripts/make-large-benchmark-scenario.sh --preset athens
+```
+
+This builds a SUMO network, generates random-trip demand, writes a runnable `.sumocfg`, and records parser benchmark output beside the generated files.
 
 To visualize an existing controller/MAPPO run, start SUMO externally with TraCI enabled and enough clients, then use **File > Attach to TraCI...** in the app:
 
