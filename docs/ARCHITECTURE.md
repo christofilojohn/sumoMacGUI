@@ -57,8 +57,10 @@ protocol SumoBackend: AnyObject {
 }
 ```
 
-### Why subscriptions, not polling
-TraCI round-trips are expensive. For a viewport showing N vehicles we issue **one** `subscribeContext` and SUMO pushes a per-step bundle of `(id, x, y, angle, speed, type)` rows. Without this, large scenarios fall over.
+### Why subscriptions by default, not only polling
+TraCI round-trips are expensive. For a viewport showing N vehicles, the default path issues **one** `subscribeContext` and SUMO pushes a per-step bundle of `(id, x, y, angle, speed, type)` rows. Without this, large scenarios fall over.
+
+This is not a simulation-model departure from `sumo-gui`: SUMO still owns time, routing, vehicle motion, and object state. SumoGUIMac is only choosing the cheaper TraCI transport path for reading that state. For compatibility checks and debugging, the Subscriptions inspector can switch vehicle updates to **Polling**, which queries active vehicles after each step at the cost of more TraCI calls.
 
 ### Why streaming `.net.xml`
 OSM-derived and city-scale networks can be 50–200MB XML. Loading the whole DOM blows out memory; SAX-style streaming keeps it under 500MB resident.

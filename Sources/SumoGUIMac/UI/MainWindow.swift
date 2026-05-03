@@ -452,7 +452,7 @@ private struct ParametersInspector: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(selectedVehicleID)
                         .font(.headline)
-                    Text("Waiting for next subscription update")
+                    Text("Waiting for next vehicle update")
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -469,8 +469,21 @@ private struct SubscriptionsInspector: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Picker("Vehicle updates", selection: $simulation.vehicleUpdateMode) {
+                ForEach(VehicleUpdateMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .help("Choose the TraCI vehicle state path")
+
+            Text(simulation.vehicleUpdateMode.helpText)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
             Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
                 DetailMetric("Session", sessionText)
+                DetailMetric("Vehicle mode", simulation.vehicleUpdateMode.summary)
                 DetailMetric("Viewport", simulation.visibleWorldBoundsSummary)
                 DetailMetric("Vehicle context", simulation.viewportSubscriptionSummary)
                 DetailMetric("Selected vehicle", simulation.selectedVehicleID)

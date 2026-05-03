@@ -32,6 +32,29 @@ final class RunningSUMOSessionTests: XCTestCase {
         XCTAssertEqual(selectedVehicleState?.selectedVehicle?.routeEdgeIDs, ["e1", "e2"])
     }
 
+    func testPollingVehicleUpdateModeReturnsLiveVehicles() async throws {
+        guard SumoLauncher.locateBinary() != nil else {
+            throw XCTSkip("SUMO not installed")
+        }
+
+        let config = try makeTinyScenario()
+        let session = try await RunningSUMOSession.start(
+            config: config,
+            subscriptionAnchorID: "j1",
+            vehicleUpdateMode: .polling
+        )
+
+        let first = try await session.step()
+        let second = try await session.step()
+        let third = try await session.step()
+        await session.close()
+
+        XCTAssertEqual(session.vehicleUpdateMode, .polling)
+        XCTAssertGreaterThan(second.simTime, first.simTime)
+        XCTAssertGreaterThan(third.simTime, second.simTime)
+        XCTAssertGreaterThan(max(first.vehicles.count, second.vehicles.count, third.vehicles.count), 0)
+    }
+
     private func makeTinyScenario() throws -> URL {
         let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("sumoguiapp-it-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: tmp, withIntermediateDirectories: true)

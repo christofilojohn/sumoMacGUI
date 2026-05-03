@@ -1,6 +1,40 @@
 import Foundation
 import SumoKit
 
+enum VehicleUpdateMode: String, CaseIterable, Identifiable {
+    case subscriptions
+    case polling
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .subscriptions:
+            return "Subscriptions"
+        case .polling:
+            return "Polling"
+        }
+    }
+
+    var summary: String {
+        switch self {
+        case .subscriptions:
+            return "Viewport context subscription"
+        case .polling:
+            return "Per-vehicle polling"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .subscriptions:
+            return "Fast TraCI path: SUMO pushes one viewport vehicle bundle after each step."
+        case .polling:
+            return "Compatibility/debug path: query each active vehicle after every step."
+        }
+    }
+}
+
 final class RunningSUMOSession {
     private let handle: SumoLauncher.Handle?
     private let connection: TraCIConnection
@@ -8,6 +42,7 @@ final class RunningSUMOSession {
     private var viewportSubscription: ViewportVehicleSubscription?
     private var selectedVehicleID: String?
     private var selectedVehicleDetails: VehicleDetails?
+    private(set) var vehicleUpdateMode: VehicleUpdateMode
 
     let versionIdentifier: String
     let versionWarning: String?
@@ -19,7 +54,8 @@ final class RunningSUMOSession {
         client: TraCIClient,
         versionIdentifier: String,
         versionWarning: String?,
-        isAttachedToExternalSUMO: Bool
+        isAttachedToExternalSUMO: Bool,
+        vehicleUpdateMode: VehicleUpdateMode
     ) {
         self.handle = handle
         self.connection = connection
@@ -27,9 +63,14 @@ final class RunningSUMOSession {
         self.versionIdentifier = versionIdentifier
         self.versionWarning = versionWarning
         self.isAttachedToExternalSUMO = isAttachedToExternalSUMO
+        self.vehicleUpdateMode = vehicleUpdateMode
     }
 
-    static func start(config: URL, subscriptionAnchorID: String?) async throws -> RunningSUMOSession {
+    static func start(
+        config: URL,
+        subscriptionAnchorID: String?,
+        vehicleUpdateMode: VehicleUpdateMode = .subscriptions
+    ) async throws -> RunningSUMOSession {
         guard let sumo = SumoLauncher.locateBinary() else {
             throw RuntimeError("Could not find the SUMO binary. Install SUMO or add `sumo` to a standard location.")
         }
@@ -45,7 +86,7 @@ final class RunningSUMOSession {
         let version = try await client.getVersion()
         let compatibility = SumoVersionCompatibility(apiVersion: version.apiVersion, identifier: version.identifier)
         try await client.subscribeSimulation()
-        if let subscriptionAnchorID {
+        if vehicleUpdateMode == .subscriptions, let subscriptionAnchorID {
             try await client.subscribeVehiclesAroundJunction(subscriptionAnchorID)
         }
 
@@ -55,9 +96,10 @@ final class RunningSUMOSession {
             client: client,
             versionIdentifier: compatibility.identifier,
             versionWarning: compatibility.warning,
-            isAttachedToExternalSUMO: false
+            isAttachedToExternalSUMO: false,
+            vehicleUpdateMode: vehicleUpdateMode
         )
-        if let subscriptionAnchorID {
+        if vehicleUpdateMode == .subscriptions, let subscriptionAnchorID {
             session.viewportSubscription = ViewportVehicleSubscription(anchorID: subscriptionAnchorID, range: 1e6)
         }
         return session
@@ -67,7 +109,8 @@ final class RunningSUMOSession {
         host: String,
         port: Int,
         clientOrder: Int32,
-        subscriptionAnchorID: String?
+        subscriptionAnchorID: String?,
+        vehicleUpdateMode: VehicleUpdateMode = .subscriptions
     ) async throws -> RunningSUMOSession {
         guard (1...65_535).contains(port) else {
             throw RuntimeError("TraCI port must be between 1 and 65535.")
@@ -79,7 +122,7 @@ final class RunningSUMOSession {
         let version = try await client.getVersion()
         let compatibility = SumoVersionCompatibility(apiVersion: version.apiVersion, identifier: version.identifier)
         try await client.subscribeSimulation()
-        if let subscriptionAnchorID {
+        if vehicleUpdateMode == .subscriptions, let subscriptionAnchorID {
             try await client.subscribeVehiclesAroundJunction(subscriptionAnchorID)
         }
 
@@ -89,9 +132,10 @@ final class RunningSUMOSession {
             client: client,
             versionIdentifier: compatibility.identifier,
             versionWarning: compatibility.warning,
-            isAttachedToExternalSUMO: true
+            isAttachedToExternalSUMO: true,
+            vehicleUpdateMode: vehicleUpdateMode
         )
-        if let subscriptionAnchorID {
+        if vehicleUpdateMode == .subscriptions, let subscriptionAnchorID {
             session.viewportSubscription = ViewportVehicleSubscription(anchorID: subscriptionAnchorID, range: 1e6)
         }
         return session
@@ -102,28 +146,30 @@ final class RunningSUMOSession {
         let simTime = results.first(where: { $0.0 == (TraCIClient.DomainCmd.subSimVar &+ 0x10) })?.1.values[TraCIClient.Var.simTime]?.asDouble
         var snapshots = ContiguousArray<VehicleSnapshot>()
 
-        for (command, result) in results where command == (TraCIClient.DomainCmd.subJunctionContext &+ 0x10) {
-            guard let vehicleID = subscribedObjectID(from: result.objectID) else {
-                continue
+        if vehicleUpdateMode == .subscriptions {
+            for (command, result) in results where command == (TraCIClient.DomainCmd.subJunctionContext &+ 0x10) {
+                guard let vehicleID = subscribedObjectID(from: result.objectID) else {
+                    continue
+                }
+                guard let position = result.values[TraCIClient.Var.position]?.asPosition2D else {
+                    continue
+                }
+                let angle = Float(result.values[TraCIClient.Var.angle]?.asDouble ?? 0)
+                let speed = Float(result.values[TraCIClient.Var.speed]?.asDouble ?? 0)
+                let typeID = stableTypeID(from: result.values[TraCIClient.Var.typeID]?.asString ?? "")
+                let routeID = result.values[TraCIClient.Var.routeID]?.asString
+                snapshots.append(VehicleSnapshot(
+                    id: vehicleID,
+                    position: SIMD2(Float(position.x), Float(position.y)),
+                    angle: angle,
+                    speed: speed,
+                    typeID: typeID,
+                    acceleration: result.values[TraCIClient.Var.acceleration]?.asDouble.map(Float.init),
+                    co2Emission: result.values[TraCIClient.Var.co2Emission]?.asDouble.map(Float.init),
+                    routeID: routeID,
+                    color: result.values[TraCIClient.Var.color]?.asColor
+                ))
             }
-            guard let position = result.values[TraCIClient.Var.position]?.asPosition2D else {
-                continue
-            }
-            let angle = Float(result.values[TraCIClient.Var.angle]?.asDouble ?? 0)
-            let speed = Float(result.values[TraCIClient.Var.speed]?.asDouble ?? 0)
-            let typeID = stableTypeID(from: result.values[TraCIClient.Var.typeID]?.asString ?? "")
-            let routeID = result.values[TraCIClient.Var.routeID]?.asString
-            snapshots.append(VehicleSnapshot(
-                id: vehicleID,
-                position: SIMD2(Float(position.x), Float(position.y)),
-                angle: angle,
-                speed: speed,
-                typeID: typeID,
-                acceleration: result.values[TraCIClient.Var.acceleration]?.asDouble.map(Float.init),
-                co2Emission: result.values[TraCIClient.Var.co2Emission]?.asDouble.map(Float.init),
-                routeID: routeID,
-                color: result.values[TraCIClient.Var.color]?.asColor
-            ))
         }
 
         for (command, result) in results where command == (TraCIClient.DomainCmd.subVehicleVar &+ 0x10) {
@@ -144,6 +190,7 @@ final class RunningSUMOSession {
     }
 
     func updateVehicleViewport(anchorID: String, range: Double) async throws {
+        guard vehicleUpdateMode == .subscriptions else { return }
         let next = ViewportVehicleSubscription(anchorID: anchorID, range: range)
         if let current = viewportSubscription, current.isEquivalent(to: next) {
             return
@@ -153,6 +200,19 @@ final class RunningSUMOSession {
         }
         try await client.subscribeVehiclesAroundJunction(anchorID, range: range)
         viewportSubscription = next
+    }
+
+    func setVehicleUpdateMode(_ mode: VehicleUpdateMode, anchorID: String?, range: Double = 1e6) async throws {
+        guard mode != vehicleUpdateMode else { return }
+        if let current = viewportSubscription {
+            try await client.unsubscribeVehiclesAroundJunction(current.anchorID)
+            viewportSubscription = nil
+        }
+        vehicleUpdateMode = mode
+        if mode == .subscriptions, let anchorID {
+            try await client.subscribeVehiclesAroundJunction(anchorID, range: range)
+            viewportSubscription = ViewportVehicleSubscription(anchorID: anchorID, range: range)
+        }
     }
 
     func routeEdges(forVehicle id: String) async throws -> [String] {

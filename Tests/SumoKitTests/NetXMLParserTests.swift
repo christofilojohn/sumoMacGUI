@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import SumoKit
 
@@ -74,6 +75,20 @@ final class NetXMLParserTests: XCTestCase {
         XCTAssertEqual(junction.incomingLanes, ["a_0"])
         XCTAssertEqual(junction.internalLanes, [":j1_0_0"])
         XCTAssertEqual(junction.bounds, SIMD4<Float>(49, -1, 51, 1))
+    }
+
+    func testMalformedNetworkReportsReadableError() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("broken-\(UUID().uuidString).net.xml")
+        try "<net><edge>".write(to: url, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        XCTAssertThrowsError(try NetXMLParser.parse(url: url)) { error in
+            let message = error.localizedDescription
+            XCTAssertTrue(message.contains("Malformed SUMO network XML"), message)
+            XCTAssertTrue(message.contains(url.lastPathComponent), message)
+            XCTAssertFalse(message.contains("NetParseError"), message)
+        }
     }
 
     func testQuadtreeFindsEdgesByViewport() throws {

@@ -11,8 +11,10 @@ struct LaunchConfiguration: Equatable {
         while let arg = iterator.next() {
             switch arg {
             case "-c", "--config":
-                openPath = iterator.next()
-            case let path where !path.hasPrefix("-") && openPath == nil:
+                if let next = iterator.next(), isSupportedInputPath(next) {
+                    openPath = next
+                }
+            case let path where !path.hasPrefix("-") && openPath == nil && isSupportedInputPath(path):
                 openPath = path
             default:
                 continue
@@ -25,5 +27,10 @@ struct LaunchConfiguration: Equatable {
 
         let url = URL(fileURLWithPath: openPath, relativeTo: currentDirectoryURL).standardizedFileURL
         return LaunchConfiguration(openURL: url)
+    }
+
+    private static func isSupportedInputPath(_ path: String) -> Bool {
+        let filename = URL(fileURLWithPath: path).lastPathComponent.lowercased()
+        return filename.hasSuffix(".sumocfg") || filename.hasSuffix(".net.xml")
     }
 }

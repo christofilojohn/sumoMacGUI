@@ -1,8 +1,17 @@
 import Foundation
 
-public enum NetParseError: Error {
+public enum NetParseError: Error, LocalizedError {
     case ioError(String)
     case malformed(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .ioError(let message):
+            return "Could not read SUMO network: \(message)"
+        case .malformed(let message):
+            return "Malformed SUMO network XML: \(message)"
+        }
+    }
 }
 
 /// Streaming SAX parser for SUMO `.net.xml`. Produces a fully-populated `NetGraph`.
@@ -31,8 +40,10 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
         parser.shouldReportNamespacePrefixes = false
         parser.shouldResolveExternalEntities = false
         guard parser.parse() else {
-            if let e = delegate.error { throw e }
-            throw NetParseError.malformed(parser.parserError?.localizedDescription ?? "unknown")
+            if let e = delegate.nonXMLParserError {
+                throw e
+            }
+            throw NetParseError.malformed("\(url.lastPathComponent): \(parserFailureMessage(parser))")
         }
         return delegate.graph
     }
@@ -47,14 +58,30 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
         parser.shouldReportNamespacePrefixes = false
         parser.shouldResolveExternalEntities = false
         guard parser.parse() else {
-            if let e = delegate.error { throw e }
-            throw NetParseError.malformed(parser.parserError?.localizedDescription ?? "unknown")
+            if let e = delegate.nonXMLParserError {
+                throw e
+            }
+            throw NetParseError.malformed("\(url.lastPathComponent): \(parserFailureMessage(parser))")
         }
     }
 
     private init(graph: NetGraph) {
         self.graph = graph
         super.init()
+    }
+
+    private var nonXMLParserError: Error? {
+        guard let error else { return nil }
+        let nsError = error as NSError
+        return nsError.domain == XMLParser.errorDomain ? nil : error
+    }
+
+    private static func parserFailureMessage(_ parser: XMLParser) -> String {
+        let detail = parser.parserError?.localizedDescription ?? "unknown parser error"
+        let line = parser.lineNumber
+        let column = parser.columnNumber
+        guard line > 0 || column > 0 else { return detail }
+        return "\(detail) at line \(line), column \(column)"
     }
 
     public func parser(_ parser: XMLParser, didStartElement elementName: String,

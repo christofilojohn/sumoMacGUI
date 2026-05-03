@@ -153,6 +153,12 @@ final class SimulationViewModel: ObservableObject {
     @Published var isFollowingSelectedVehicle = false
     @Published var isRotatingWithSelectedVehicle = false
     @Published var stepDelay: Double = 0.1
+    @Published var vehicleUpdateMode: VehicleUpdateMode = .subscriptions {
+        didSet {
+            guard vehicleUpdateMode != oldValue else { return }
+            applyVehicleUpdateModeChange()
+        }
+    }
     @Published var laneColorMode: LaneColorMode = .speedLimit
     @Published var vehicleColorMode: VehicleColorMode = .speed
     @Published var junctionColorMode: JunctionColorMode = .type
@@ -172,6 +178,7 @@ final class SimulationViewModel: ObservableObject {
     private var session: RunningSUMOSession?
     private var playTask: Task<Void, Never>?
     private var viewportSubscriptionTask: Task<Void, Never>?
+    private var vehicleUpdateModeTask: Task<Void, Never>?
     private var hoverRouteTask: Task<Void, Never>?
     private var latestViewportBounds: SIMD4<Float>?
     private var spatialIndexes: SpatialIndexes?
@@ -193,6 +200,8 @@ final class SimulationViewModel: ObservableObject {
 
     deinit {
         playTask?.cancel()
+        viewportSubscriptionTask?.cancel()
+        vehicleUpdateModeTask?.cancel()
         session?.terminateImmediately()
     }
 
@@ -304,6 +313,7 @@ final class SimulationViewModel: ObservableObject {
 
     var viewportSubscriptionSummary: String {
         guard canRunSimulation else { return "No active SUMO session" }
+        guard vehicleUpdateMode == .subscriptions else { return "Polling all active vehicles" }
         guard latestViewportBounds != nil else { return "Waiting for visible bounds" }
         return "Viewport vehicle context active"
     }
@@ -636,7 +646,8 @@ final class SimulationViewModel: ObservableObject {
                 do {
                     let running = try await RunningSUMOSession.start(
                         config: configURL,
-                        subscriptionAnchorID: parsed.junctions.first?.id
+                        subscriptionAnchorID: parsed.junctions.first?.id,
+                        vehicleUpdateMode: vehicleUpdateMode
                     )
                     session = running
                     if let latestViewportBounds {
@@ -696,7 +707,8 @@ final class SimulationViewModel: ObservableObject {
                     host: host,
                     port: port,
                     clientOrder: clientOrder,
-                    subscriptionAnchorID: parsed.junctions.first?.id
+                    subscriptionAnchorID: parsed.junctions.first?.id,
+                    vehicleUpdateMode: vehicleUpdateMode
                 )
                 session = running
                 if let latestViewportBounds {
@@ -1069,6 +1081,11 @@ final class SimulationViewModel: ObservableObject {
     }
 
     func updateVisibleWorldBounds(_ bounds: SIMD4<Float>) {
+        latestViewportBounds = bounds
+        guard vehicleUpdateMode == .subscriptions else {
+            viewportSubscriptionTask?.cancel()
+            return
+        }
         guard
             let graph,
             let request = ViewportSubscriptionPlanner.request(
@@ -1077,10 +1094,8 @@ final class SimulationViewModel: ObservableObject {
                 visibleBounds: bounds
             )
         else {
-            latestViewportBounds = bounds
             return
         }
-        latestViewportBounds = bounds
         viewportSubscriptionTask?.cancel()
         viewportSubscriptionTask = Task { @MainActor [weak self] in
             try? await Task.sleep(nanoseconds: 120_000_000)
@@ -1091,6 +1106,46 @@ final class SimulationViewModel: ObservableObject {
                 self.runtimeMessage = "Viewport subscription failed: \(error.localizedDescription)"
             }
         }
+    }
+
+    private func applyVehicleUpdateModeChange() {
+        viewportSubscriptionTask?.cancel()
+        vehicleUpdateModeTask?.cancel()
+        guard let session else {
+            runtimeMessage = "Vehicle updates: \(vehicleUpdateMode.title)"
+            return
+        }
+        let requestedMode = vehicleUpdateMode
+        let request = currentVehicleViewportRequest()
+        let fallbackAnchorID = graph?.junctions.first?.id
+        vehicleUpdateModeTask = Task { @MainActor [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            do {
+                try await session.setVehicleUpdateMode(
+                    requestedMode,
+                    anchorID: request?.anchorJunctionID ?? fallbackAnchorID,
+                    range: request?.range ?? 1e6
+                )
+                self.runtimeMessage = "Vehicle updates: \(requestedMode.title)"
+            } catch {
+                self.runtimeMessage = "Vehicle update mode failed: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func currentVehicleViewportRequest() -> VehicleViewportSubscriptionRequest? {
+        guard
+            let graph,
+            let latestViewportBounds,
+            let spatialIndexes
+        else {
+            return nil
+        }
+        return ViewportSubscriptionPlanner.request(
+            graph: graph,
+            indexes: spatialIndexes,
+            visibleBounds: latestViewportBounds
+        )
     }
 
     func selectEdge(_ id: String?) {
@@ -1328,6 +1383,8 @@ final class SimulationViewModel: ObservableObject {
         playTask = nil
         viewportSubscriptionTask?.cancel()
         viewportSubscriptionTask = nil
+        vehicleUpdateModeTask?.cancel()
+        vehicleUpdateModeTask = nil
         clearHoverRoutePreview()
         isPlaying = false
         resetPlaybackSpeed()
@@ -1512,7 +1569,7 @@ final class SimulationViewModel: ObservableObject {
     }
 
     private func connectionMessage(prefix: String, session: RunningSUMOSession, suffix: String = "") -> String {
-        let base = "\(prefix) to \(session.versionIdentifier)\(suffix)"
+        let base = "\(prefix) to \(session.versionIdentifier)\(suffix) using \(session.vehicleUpdateMode.title.lowercased())"
         guard let warning = session.versionWarning else { return base }
         return "\(base). \(warning)"
     }
