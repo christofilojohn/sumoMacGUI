@@ -46,6 +46,14 @@ For a real macOS `.app` bundle with the app icon:
 xcodebuild -project SumoGUIMac.xcodeproj -scheme SumoGUIMacApp -configuration Debug -destination platform=macOS build
 ```
 
+For an alpha release zip:
+
+```sh
+Scripts/build-alpha-release.sh 0.1.0-alpha
+```
+
+The script writes `SumoGUIMac.app` and `SumoGUIMac-0.1.0-alpha-macOS-arm64.zip` under `.build/`. Alpha builds are ad-hoc signed for local testing and are not notarized yet.
+
 To open a file on launch, more like `sumo-gui`:
 
 ```sh

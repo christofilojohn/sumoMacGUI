@@ -25,15 +25,25 @@ final class SimulationViewModel: ObservableObject {
         let bounds: SIMD4<Float>?
     }
 
+    struct ScreenshotExportRequest: Equatable, Identifiable {
+        let id: UUID
+        let url: URL
+    }
+
     @Published private(set) var graph: NetGraph?
     @Published private(set) var sourceURL: URL?
     @Published private(set) var loadState: LoadState = .empty
     @Published private(set) var liveState = SimulationState()
     @Published private(set) var runtimeMessage: String?
+    @Published private(set) var playbackSpeedFactor: Double = 0
+    @Published private(set) var screenshotExportRequest: ScreenshotExportRequest?
     @Published private(set) var selectedVehicleID: String?
     @Published var selectedEdgeID: String?
     @Published var isPlaying = false
+    @Published var isFollowingSelectedVehicle = false
     @Published var stepDelay: Double = 0.1
+    @Published var laneColorMode: LaneColorMode = .speedLimit
+    @Published var vehicleColorMode: VehicleColorMode = .speed
 
     private let initialOpenURL: URL?
     private var didAttemptInitialLoad = false
@@ -42,6 +52,8 @@ final class SimulationViewModel: ObservableObject {
     private var viewportSubscriptionTask: Task<Void, Never>?
     private var latestViewportBounds: SIMD4<Float>?
     private var spatialIndexes: SpatialIndexes?
+    private var lastPlaybackWallTime: TimeInterval?
+    private var lastPlaybackSimTime: Double?
 
     init(initialOpenURL: URL? = nil) {
         self.initialOpenURL = initialOpenURL
@@ -70,6 +82,18 @@ final class SimulationViewModel: ObservableObject {
 
     var canRunSimulation: Bool {
         session != nil
+    }
+
+    var canFollowSelectedVehicle: Bool {
+        selectedVehicleID != nil
+    }
+
+    var followedVehiclePosition: SIMD2<Float>? {
+        guard isFollowingSelectedVehicle, let selectedVehicleID else { return nil }
+        if let vehicle = liveState.vehicles.first(where: { $0.id == selectedVehicleID }) {
+            return vehicle.position
+        }
+        return liveState.selectedVehicle?.position
     }
 
     var isExternalTraCIAttached: Bool {
@@ -158,6 +182,41 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    func presentScreenshotPanel() {
+        guard graph != nil else {
+            runtimeMessage = "Open a network before exporting a screenshot."
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.title = "Export Screenshot"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [UTType.png]
+        panel.nameFieldStringValue = defaultScreenshotFilename()
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.requestScreenshotExport(to: url)
+            }
+        }
+    }
+
+    func requestScreenshotExport(to url: URL) {
+        screenshotExportRequest = ScreenshotExportRequest(id: UUID(), url: url)
+        runtimeMessage = "Exporting screenshot..."
+    }
+
+    func completeScreenshotExport(id: UUID, result: Result<URL, Error>) {
+        guard screenshotExportRequest?.id == id else { return }
+        screenshotExportRequest = nil
+        switch result {
+        case .success(let url):
+            runtimeMessage = "Exported screenshot to \(url.lastPathComponent)"
+        case .failure(let error):
+            runtimeMessage = "Screenshot export failed: \(error.localizedDescription)"
+        }
+    }
+
     func performInitialLoadIfNeeded() {
         guard !didAttemptInitialLoad else { return }
         didAttemptInitialLoad = true
@@ -172,8 +231,10 @@ final class SimulationViewModel: ObservableObject {
         loadState = .loading(url.lastPathComponent)
         liveState = SimulationState()
         runtimeMessage = nil
+        resetPlaybackSpeed()
         selectedVehicleID = nil
         selectedEdgeID = nil
+        isFollowingSelectedVehicle = false
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
@@ -212,8 +273,10 @@ final class SimulationViewModel: ObservableObject {
         loadState = .loading("Attaching to \(host):\(port)")
         liveState = SimulationState()
         runtimeMessage = nil
+        resetPlaybackSpeed()
         selectedVehicleID = nil
         selectedEdgeID = nil
+        isFollowingSelectedVehicle = false
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
@@ -239,6 +302,7 @@ final class SimulationViewModel: ObservableObject {
                 }
                 runtimeMessage = "Attached to \(running.versionIdentifier) at \(host):\(port)"
                 isPlaying = true
+                resetPlaybackSpeed()
                 startPlayback()
             } catch {
                 runtimeMessage = "Network loaded. TraCI attach failed: \(error.localizedDescription)"
@@ -254,10 +318,12 @@ final class SimulationViewModel: ObservableObject {
         guard session != nil else { return }
         isPlaying.toggle()
         if isPlaying {
+            resetPlaybackSpeed()
             startPlayback()
         } else {
             playTask?.cancel()
             playTask = nil
+            resetPlaybackSpeed()
         }
     }
 
@@ -271,13 +337,15 @@ final class SimulationViewModel: ObservableObject {
         isPlaying = false
         playTask?.cancel()
         playTask = nil
-        await stepSimulation()
+        await stepSimulation(updatePlaybackSpeed: false)
+        resetPlaybackSpeed()
     }
 
     func stop() async {
         isPlaying = false
         playTask?.cancel()
         playTask = nil
+        resetPlaybackSpeed()
         if canRunSimulation {
             if isExternalTraCIAttached {
                 runtimeMessage = String(format: "Viewer sync paused at t = %.2fs", liveState.simTime)
@@ -287,16 +355,67 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
-    private func stepSimulation() async {
+    func recordPlaybackStep(simTime: Double, wallTime: TimeInterval) {
+        defer {
+            lastPlaybackSimTime = simTime
+            lastPlaybackWallTime = wallTime
+        }
+
+        guard
+            let lastPlaybackWallTime,
+            let lastPlaybackSimTime
+        else {
+            playbackSpeedFactor = 0
+            return
+        }
+
+        let wallDelta = wallTime - lastPlaybackWallTime
+        let simDelta = simTime - lastPlaybackSimTime
+        guard wallDelta > 0, simDelta >= 0 else {
+            playbackSpeedFactor = 0
+            return
+        }
+
+        playbackSpeedFactor = simDelta / wallDelta
+    }
+
+    func playbackDelayNanoseconds() -> UInt64 {
+        UInt64(max(stepDelay, 0.02) * 1_000_000_000)
+    }
+
+    func resetPlaybackSpeed() {
+        playbackSpeedFactor = 0
+        lastPlaybackWallTime = nil
+        lastPlaybackSimTime = nil
+    }
+
+    private func stepSimulation(updatePlaybackSpeed: Bool = true) async {
         guard let session else { return }
         do {
-            liveState = try await session.step()
-            runtimeMessage = String(format: "t = %.2fs, %d vehicles", liveState.simTime, liveState.vehicles.count)
+            let nextState = try await session.step()
+            liveState = nextState
+            if updatePlaybackSpeed {
+                recordPlaybackStep(
+                    simTime: nextState.simTime,
+                    wallTime: Date.timeIntervalSinceReferenceDate
+                )
+            }
+            if playbackSpeedFactor > 0 {
+                runtimeMessage = String(
+                    format: "t = %.2fs, %d vehicles, %.1fx",
+                    liveState.simTime,
+                    liveState.vehicles.count,
+                    playbackSpeedFactor
+                )
+            } else {
+                runtimeMessage = String(format: "t = %.2fs, %d vehicles", liveState.simTime, liveState.vehicles.count)
+            }
         } catch {
             runtimeMessage = "Simulation step failed: \(error.localizedDescription)"
             isPlaying = false
             playTask?.cancel()
             playTask = nil
+            resetPlaybackSpeed()
         }
     }
 
@@ -334,6 +453,7 @@ final class SimulationViewModel: ObservableObject {
         selectedEdgeID = id
         if id != nil {
             selectVehicle(nil)
+            isFollowingSelectedVehicle = false
         }
     }
 
@@ -345,6 +465,7 @@ final class SimulationViewModel: ObservableObject {
         }
         if id == nil {
             liveState.selectedVehicle = nil
+            isFollowingSelectedVehicle = false
         }
         Task { @MainActor [weak self] in
             guard let self, let session = self.session else { return }
@@ -356,6 +477,14 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    func toggleFollowSelectedVehicle() {
+        guard canFollowSelectedVehicle else {
+            isFollowingSelectedVehicle = false
+            return
+        }
+        isFollowingSelectedVehicle.toggle()
+    }
+
     private func startPlayback() {
         playTask?.cancel()
         playTask = Task { @MainActor [weak self] in
@@ -365,8 +494,7 @@ final class SimulationViewModel: ObservableObject {
                 if self.isExternalTraCIAttached {
                     await Task.yield()
                 } else {
-                    let delay = UInt64(max(self.stepDelay, 0.02) * 1_000_000_000)
-                    try? await Task.sleep(nanoseconds: delay)
+                    try? await Task.sleep(nanoseconds: self.playbackDelayNanoseconds())
                 }
             }
         }
@@ -378,6 +506,7 @@ final class SimulationViewModel: ObservableObject {
         viewportSubscriptionTask?.cancel()
         viewportSubscriptionTask = nil
         isPlaying = false
+        resetPlaybackSpeed()
         if let session {
             await session.close()
         }
@@ -442,6 +571,15 @@ final class SimulationViewModel: ObservableObject {
 
     private func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func defaultScreenshotFilename() -> String {
+        let base = sourceURL?.deletingPathExtension().lastPathComponent ?? "SumoGUIMac"
+        let safeBase = base
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_")).inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+        return "\(safeBase.isEmpty ? "SumoGUIMac" : safeBase)-screenshot.png"
     }
 
     private func edgeFunctionText(_ function: EdgeFunction) -> String {

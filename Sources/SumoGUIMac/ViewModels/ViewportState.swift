@@ -33,6 +33,12 @@ final class ViewportState: ObservableObject {
         onChange?()
     }
 
+    func center(on point: SIMD2<Float>) {
+        guard isConfigured else { return }
+        center = point
+        onChange?()
+    }
+
     func zoom(by factor: Float, anchorWorld: SIMD2<Float>) {
         guard isConfigured else { return }
         let clampedFactor = max(0.25, min(factor, 4))

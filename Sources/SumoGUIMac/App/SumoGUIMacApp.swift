@@ -30,6 +30,14 @@ struct SumoGUIMacApp: App {
                     simulation.presentAttachPanel()
                 }
                 .keyboardShortcut("o", modifiers: [.command, .shift])
+
+                Divider()
+
+                Button("Export Screenshot...") {
+                    simulation.presentScreenshotPanel()
+                }
+                .keyboardShortcut("s", modifiers: [.command, .shift])
+                .disabled(simulation.graph == nil)
             }
             CommandMenu("View") {
                 Button("Fit Network") {
@@ -51,6 +59,14 @@ struct SumoGUIMacApp: App {
                 }
                 .keyboardShortcut("-", modifiers: .command)
                 .disabled(simulation.graph == nil)
+
+                Divider()
+
+                Button(simulation.isFollowingSelectedVehicle ? "Stop Following Vehicle" : "Follow Selected Vehicle") {
+                    simulation.toggleFollowSelectedVehicle()
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(!simulation.canFollowSelectedVehicle)
             }
             CommandMenu("Simulation") {
                 Button(simulation.isPlaying ? "Pause" : "Play") {

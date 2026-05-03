@@ -38,4 +38,3 @@ playground.xcworkspace/
 .env.*
 !.env.example
 docs/CHANGELOG.md
-docs/DECISIONS.md

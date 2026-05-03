@@ -56,17 +56,17 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ### Window chrome
 - [~] Three-pane `NavigationSplitView`: left objects sidebar, centre `NetworkView`, right inspector (initial shell works)
-- [~] Bottom transport bar: open / play / pause / step / delay slider / sim-time / speed factor (stop now halts without destroying the run; speed factor pending)
+- [~] Bottom transport bar: open / play / pause / step / delay slider / sim-time / measured speed factor (core controls wired; speed display is measured from sim-time/wall-time; richer timing presets pending)
 - [~] CLI/open-file launch path: accept `.sumocfg` / `.net.xml` on startup (`-c path` or bare path); recent-files/open-document polish pending
-- [~] Menu bar: File (Open, Attach to TraCI), View (fit/zoom), and Simulation (play/pause/step/stop) command menus are wired; recents, screenshots, settings, breakpoints, and multi-view polish pending
+- [~] Menu bar: File (Open, Attach to TraCI, Export Screenshot), View (fit/zoom), and Simulation (play/pause/step/stop) command menus are wired; recents, settings, breakpoints, and multi-view polish pending
 - [~] Keyboard shortcuts matching sumo-gui where possible (`⌘O`, `⌘0`, `⌘=`, `⌘-`, `space=play/pause`, `s=step`, `⌘.=stop` wired; more parity shortcuts pending)
 - [ ] Inspector tabs: Parameters, Subscriptions, Tracker (Swift Charts time-series)
 
 ## Day 5 — Visualization parity
 
 ### Color schemes (matching `GUIColorScheme.cpp`)
-- [ ] Lane: by speed-limit, by lane-index, by occupancy, by edge type, uniform
-- [ ] Vehicle: by speed, by acceleration, by route, by type, by CO₂, by colour-attr
+- [~] Lane: by speed-limit, by lane-index, by occupancy, by edge type, uniform (speed-limit, lane-index, edge-type, and uniform modes are wired through toolbar menus; occupancy pending TraCI lane subscriptions)
+- [~] Vehicle: by speed, by acceleration, by route, by type, by CO₂, by colour-attr (speed, type, and uniform modes are wired through toolbar menus; acceleration/route/emissions/colour-attr pending broader subscriptions)
 - [ ] Junction: by type, by load
 - [ ] Custom palette editor with import/export to SUMO XML format
 - [ ] Background: PNG/GeoTIFF decal with georeferencing
@@ -78,11 +78,11 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ## Day 6 — Inspection, breakpoints, trackers
 
-- [ ] Right-click context menu per object class (Vehicle: track, follow, copy id, show route, remove)
+- [~] Right-click context menu per object class (Vehicle follow exists as toolbar/menu action for selected vehicle; contextual menu/copy/route/remove pending)
 - [~] Selection set persistence + selection-driven colour overlay (single selected edge/vehicle render feedback and edge inspector details are wired; persistence/multi-select pending)
 - [ ] Breakpoints panel — list of sim-times to halt at; double-click to jump
 - [ ] Tracker windows (Swift Charts) — time-series of any TraCI variable for selected object(s)
-- [ ] Vehicle tracking camera (centre + rotate-with-heading)
+- [~] Vehicle tracking camera (centre-on-selected-vehicle follow mode is wired; rotate-with-heading pending)
 - [ ] Route highlighting on hover
 
 ## Day 7 — Stability, scale, ship
@@ -90,8 +90,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 - [ ] Large benchmark scenario script (OSM import via `osmGet.py`/`netconvert`)
 - [ ] Run a large benchmark for 1 hour sim time, profile with Instruments — fix top 3 hot paths
 - [ ] Crash test: kill `sumo` subprocess mid-step, verify UI recovers gracefully
-- [ ] Screenshot/video export (PNG, MP4 via AVFoundation)
-- [~] Notarization-ready build path (`SumoGUIMacApp` Xcode scheme builds a signed local `.app`; release archive script, developer-team signing, and notarization still pending)
+- [~] Screenshot/video export (PNG export from the current native view is wired; MP4 via AVFoundation pending)
+- [~] Notarization-ready build path (`SumoGUIMacApp` Xcode scheme builds a signed local `.app`; `Scripts/build-alpha-release.sh` creates an ad-hoc signed alpha zip; developer-team signing and notarization still pending)
 - [ ] README with screenshot, install instructions, contributing guide
 - [ ] First public tag: `v0.1.0`
 
@@ -111,9 +111,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ## Handoff state (update at end of every session)
 
-- **Last touched:** 2026-05-01 — codex — Added external TraCI attach mode for controller/MAPPO workflows and added an Xcode `.app` target with a generated app icon. `swift test` passes 26/26, and `xcodebuild -project SumoGUIMac.xcodeproj -scheme SumoGUIMacApp -configuration Debug -destination platform=macOS -derivedDataPath .build/XcodeDerivedData-App build` succeeds.
-- **Next action:** Live-smoke external attach with `sumo --remote-port <port> --num-clients 2` and a second controller client, then prepare the first alpha commit once the working tree is reviewed.
-- **Known blockers:** External attach mode needs a live multi-client SUMO smoke test with the controller at one TraCI order and SumoGUIMac at another. Release signing is local/ad-hoc only; developer-team signing, archive export, and notarization are still pending. Junction triangulation is simple fan triangulation, so unusual concave junction shapes may need a more robust tessellator. Lane joins are segment-based rather than full SUMO-style stroked joins, and viewport subscriptions are junction-radius based, so very sparse networks may still overfetch until a true viewport query/filter strategy lands.
+- **Last touched:** 2026-05-03 — codex — Added follow-selected-vehicle mode. Toolbar, transport bar, and View menu actions toggle camera follow for the selected vehicle, and the viewport recentres on new live positions without changing zoom.
+- **Next action:** Run the first GitHub Actions CI pass after pushing, live-smoke external attach with `sumo --remote-port <port> --num-clients 2` and a second controller client, then continue early parity with recent-files/open-document polish before the first public alpha tag.
+- **Known blockers:** External attach mode needs a live multi-client SUMO smoke test with the controller at one TraCI order and SumoGUIMac at another. Release signing is local/ad-hoc only; Developer ID signing and notarization are still pending. Junction triangulation is simple fan triangulation, so unusual concave junction shapes may need a more robust tessellator. Lane joins are segment-based rather than full SUMO-style stroked joins, and viewport subscriptions are junction-radius based, so very sparse networks may still overfetch until a true viewport query/filter strategy lands.
 - **Local SUMO version targeted:** 1.26.0 at `/Library/Frameworks/EclipseSUMO.framework/Versions/1.26.0/EclipseSUMO`. SUMO_HOME for the python tools = `$FW/share/sumo`.
 
 ## Lessons learned (read these before debugging)

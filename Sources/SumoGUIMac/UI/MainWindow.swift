@@ -36,6 +36,12 @@ struct MainWindow: View {
                 }
                 .disabled(simulation.graph == nil)
                 Button {
+                    simulation.toggleFollowSelectedVehicle()
+                } label: {
+                    Label("Follow", systemImage: simulation.isFollowingSelectedVehicle ? "location.fill" : "location")
+                }
+                .disabled(!simulation.canFollowSelectedVehicle)
+                Button {
                     viewport.zoomIn()
                 } label: {
                     Label("Zoom In", systemImage: "plus.magnifyingglass")
@@ -61,6 +67,14 @@ struct MainWindow: View {
                 }
                 .disabled(!simulation.canRunSimulation)
             }
+            ToolbarItemGroup {
+                Button {
+                    simulation.presentScreenshotPanel()
+                } label: {
+                    Label("Screenshot", systemImage: "camera")
+                }
+                .disabled(simulation.graph == nil)
+            }
         }
     }
 }
@@ -78,6 +92,10 @@ private struct NetworkWorkspace: View {
                     viewport: viewport,
                     selectedEdgeID: simulation.selectedEdgeID,
                     selectedVehicleID: simulation.selectedVehicleID,
+                    laneColorMode: simulation.laneColorMode,
+                    vehicleColorMode: simulation.vehicleColorMode,
+                    screenshotExportRequest: simulation.screenshotExportRequest,
+                    onScreenshotExportCompleted: simulation.completeScreenshotExport,
                     onVisibleWorldBoundsChanged: simulation.updateVisibleWorldBounds,
                     onVehiclePicked: simulation.selectVehicle,
                     onEdgePicked: simulation.setSelectedEdge
@@ -90,6 +108,10 @@ private struct NetworkWorkspace: View {
             TransportBar()
         }
         .background(Color(nsColor: .textBackgroundColor))
+        .onChange(of: simulation.followedVehiclePosition) { _, position in
+            guard let position else { return }
+            viewport.center(on: position)
+        }
     }
 }
 
@@ -358,13 +380,57 @@ private struct TransportBar: View {
             .disabled(!simulation.canRunSimulation)
             .help("Step")
 
+            Button {
+                simulation.toggleFollowSelectedVehicle()
+            } label: {
+                Image(systemName: simulation.isFollowingSelectedVehicle ? "location.fill" : "location")
+            }
+            .disabled(!simulation.canFollowSelectedVehicle)
+            .help("Follow selected vehicle")
+
+            Menu {
+                Picker("Lane Color", selection: $simulation.laneColorMode) {
+                    ForEach(LaneColorMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            } label: {
+                Image(systemName: "road.lanes")
+            }
+            .help("Lane color mode")
+
+            Menu {
+                Picker("Vehicle Color", selection: $simulation.vehicleColorMode) {
+                    ForEach(VehicleColorMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+            } label: {
+                Image(systemName: "car.side")
+            }
+            .help("Vehicle color mode")
+
             Slider(value: $simulation.stepDelay, in: 0.02...1.0)
-                .frame(width: 160)
+                .frame(width: 130)
                 .disabled(!simulation.canRunSimulation || simulation.isExternalTraCIAttached)
+                .help("Delay between simulation steps")
 
             Text(delayText)
                 .monospacedDigit()
                 .foregroundStyle(.secondary)
+
+            Divider()
+                .frame(height: 20)
+
+            Text(simTimeText)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 82, alignment: .leading)
+
+            Text(speedFactorText)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(minWidth: 64, alignment: .leading)
 
             Spacer()
 
@@ -380,6 +446,15 @@ private struct TransportBar: View {
             return "external sync"
         }
         return String(format: "%.2fs delay", simulation.stepDelay)
+    }
+
+    private var simTimeText: String {
+        String(format: "t %.2fs", simulation.liveState.simTime)
+    }
+
+    private var speedFactorText: String {
+        guard simulation.playbackSpeedFactor > 0 else { return "0.0x" }
+        return String(format: "%.1fx", simulation.playbackSpeedFactor)
     }
 }
 

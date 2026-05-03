@@ -39,6 +39,83 @@ final class SimulationViewModelTests: XCTestCase {
         XCTAssertLessThan(request?.range ?? .infinity, 180)
     }
 
+    func testPlaybackSpeedFactorUsesSimulationDeltaOverWallDelta() {
+        let viewModel = SimulationViewModel()
+
+        viewModel.recordPlaybackStep(simTime: 10, wallTime: 100)
+        XCTAssertEqual(viewModel.playbackSpeedFactor, 0)
+
+        viewModel.recordPlaybackStep(simTime: 12, wallTime: 100.5)
+        XCTAssertEqual(viewModel.playbackSpeedFactor, 4, accuracy: 0.001)
+
+        viewModel.resetPlaybackSpeed()
+        XCTAssertEqual(viewModel.playbackSpeedFactor, 0)
+    }
+
+    func testPlaybackDelayIsClampedToMinimumFrameDelay() {
+        let viewModel = SimulationViewModel()
+
+        viewModel.stepDelay = 0
+        XCTAssertEqual(viewModel.playbackDelayNanoseconds(), 20_000_000)
+
+        viewModel.stepDelay = 0.25
+        XCTAssertEqual(viewModel.playbackDelayNanoseconds(), 250_000_000)
+    }
+
+    func testDefaultVisualizationModesMatchCurrentRendererBehavior() {
+        let viewModel = SimulationViewModel()
+
+        XCTAssertEqual(viewModel.laneColorMode, .speedLimit)
+        XCTAssertEqual(viewModel.vehicleColorMode, .speed)
+        XCTAssertEqual(LaneColorMode.allCases.map(\.title), ["Speed Limit", "Lane Index", "Edge Type", "Uniform"])
+        XCTAssertEqual(VehicleColorMode.allCases.map(\.title), ["Speed", "Type", "Uniform"])
+    }
+
+    func testScreenshotExportRequestLifecycleReportsSuccess() throws {
+        let viewModel = SimulationViewModel()
+        let url = URL(fileURLWithPath: "/tmp/sumogui-screenshot.png")
+
+        viewModel.requestScreenshotExport(to: url)
+
+        let request = viewModel.screenshotExportRequest
+        XCTAssertEqual(request?.url, url)
+        XCTAssertEqual(viewModel.runtimeMessage, "Exporting screenshot...")
+
+        let id = try XCTUnwrap(request?.id)
+        viewModel.completeScreenshotExport(id: id, result: .success(url))
+
+        XCTAssertNil(viewModel.screenshotExportRequest)
+        XCTAssertEqual(viewModel.runtimeMessage, "Exported screenshot to sumogui-screenshot.png")
+    }
+
+    func testScreenshotExportIgnoresStaleCompletion() {
+        let viewModel = SimulationViewModel()
+        let url = URL(fileURLWithPath: "/tmp/sumogui-screenshot.png")
+
+        viewModel.requestScreenshotExport(to: url)
+        viewModel.completeScreenshotExport(id: UUID(), result: .success(url))
+
+        XCTAssertNotNil(viewModel.screenshotExportRequest)
+        XCTAssertEqual(viewModel.runtimeMessage, "Exporting screenshot...")
+    }
+
+    func testFollowSelectedVehicleRequiresSelectionAndClearsWithEdgeSelection() {
+        let viewModel = SimulationViewModel()
+
+        viewModel.toggleFollowSelectedVehicle()
+        XCTAssertFalse(viewModel.isFollowingSelectedVehicle)
+
+        viewModel.selectVehicle("veh0")
+        XCTAssertTrue(viewModel.canFollowSelectedVehicle)
+
+        viewModel.toggleFollowSelectedVehicle()
+        XCTAssertTrue(viewModel.isFollowingSelectedVehicle)
+
+        viewModel.setSelectedEdge("edge0")
+        XCTAssertNil(viewModel.selectedVehicleID)
+        XCTAssertFalse(viewModel.isFollowingSelectedVehicle)
+    }
+
     func testStopHaltsButKeepsSessionAlive() async throws {
         guard SumoLauncher.locateBinary() != nil else {
             throw XCTSkip("SUMO not installed")

@@ -37,6 +37,21 @@ Build the macOS app bundle from the shared Xcode scheme:
 xcodebuild -project SumoGUIMac.xcodeproj -scheme SumoGUIMacApp -configuration Debug -destination platform=macOS build
 ```
 
+Build an alpha release zip:
+
+```sh
+Scripts/build-alpha-release.sh 0.1.0-alpha
+```
+
+The release script builds the shared Xcode scheme with `Release` configuration,
+verifies the local ad-hoc signature, and writes:
+
+- `.build/XcodeDerivedData-Release/Build/Products/Release/SumoGUIMac.app`
+- `.build/releases/SumoGUIMac-0.1.0-alpha-macOS-arm64.zip`
+
+These alpha artifacts are suitable for local testing and GitHub pre-releases,
+but they are not Developer ID signed or notarized yet.
+
 Open a config directly on launch:
 
 ```sh

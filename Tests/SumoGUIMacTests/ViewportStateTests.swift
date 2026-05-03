@@ -70,6 +70,17 @@ final class ViewportStateTests: XCTestCase {
         XCTAssertEqual(viewport.center.y, 475, accuracy: 0.001)
     }
 
+    func testCenterOnMovesCameraWithoutChangingScale() {
+        let viewport = makeFitted()
+        let scale = viewport.pointsPerWorldUnit
+
+        viewport.center(on: SIMD2(42, 84))
+
+        XCTAssertEqual(viewport.center.x, 42, accuracy: 0.001)
+        XCTAssertEqual(viewport.center.y, 84, accuracy: 0.001)
+        XCTAssertEqual(viewport.pointsPerWorldUnit, scale, accuracy: 0.001)
+    }
+
     func testZoomFactorClampedToReasonableRange() {
         let viewport = makeFitted()
         let before = viewport.pointsPerWorldUnit

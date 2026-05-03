@@ -10,6 +10,10 @@ struct NetworkView: NSViewRepresentable {
     let viewport: ViewportState
     let selectedEdgeID: String?
     let selectedVehicleID: String?
+    let laneColorMode: LaneColorMode
+    let vehicleColorMode: VehicleColorMode
+    let screenshotExportRequest: SimulationViewModel.ScreenshotExportRequest?
+    let onScreenshotExportCompleted: (UUID, Result<URL, Error>) -> Void
     let onVisibleWorldBoundsChanged: (SIMD4<Float>) -> Void
     let onVehiclePicked: (String?) -> Void
     let onEdgePicked: (String?) -> Void
@@ -19,9 +23,13 @@ struct NetworkView: NSViewRepresentable {
         view.viewport = viewport
         view.selectedEdgeID = selectedEdgeID
         view.selectedVehicleID = selectedVehicleID
+        view.laneColorMode = laneColorMode
+        view.vehicleColorMode = vehicleColorMode
+        view.onScreenshotExportCompleted = onScreenshotExportCompleted
         view.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         view.onVehiclePicked = onVehiclePicked
         view.onEdgePicked = onEdgePicked
+        view.screenshotExportRequest = screenshotExportRequest
         return view
     }
 
@@ -31,9 +39,13 @@ struct NetworkView: NSViewRepresentable {
         nsView.simulationState = simulationState
         nsView.selectedEdgeID = selectedEdgeID
         nsView.selectedVehicleID = selectedVehicleID
+        nsView.laneColorMode = laneColorMode
+        nsView.vehicleColorMode = vehicleColorMode
+        nsView.onScreenshotExportCompleted = onScreenshotExportCompleted
         nsView.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         nsView.onVehiclePicked = onVehiclePicked
         nsView.onEdgePicked = onEdgePicked
+        nsView.screenshotExportRequest = screenshotExportRequest
     }
 }
 
@@ -64,6 +76,8 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var vehicleAnimationSource: [String: VehicleRenderSample] = [:]
     private var vehicleAnimationTarget: [String: VehicleRenderSample] = [:]
     private var magnifyEventMonitor: Any?
+    private var handledScreenshotRequestID: UUID?
+    var onScreenshotExportCompleted: ((UUID, Result<URL, Error>) -> Void)?
     var onVisibleWorldBoundsChanged: ((SIMD4<Float>) -> Void)?
     var onVehiclePicked: ((String?) -> Void)?
     var onEdgePicked: ((String?) -> Void)?
@@ -97,6 +111,34 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         didSet {
             guard selectedVehicleID != oldValue else { return }
             updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
+        }
+    }
+
+    var laneColorMode: LaneColorMode = .speedLimit {
+        didSet {
+            guard laneColorMode != oldValue else { return }
+            rebuildLaneBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var vehicleColorMode: VehicleColorMode = .speed {
+        didSet {
+            guard vehicleColorMode != oldValue else { return }
+            updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
+        }
+    }
+
+    var screenshotExportRequest: SimulationViewModel.ScreenshotExportRequest? {
+        didSet {
+            guard
+                let request = screenshotExportRequest,
+                request.id != handledScreenshotRequestID
+            else {
+                return
+            }
+            handledScreenshotRequestID = request.id
+            exportScreenshot(request)
         }
     }
 
@@ -367,6 +409,34 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         metalView.setNeedsDisplay(bounds)
     }
 
+    private func exportScreenshot(_ request: SimulationViewModel.ScreenshotExportRequest) {
+        do {
+            try writePNGSnapshot(to: request.url)
+            onScreenshotExportCompleted?(request.id, .success(request.url))
+        } catch {
+            onScreenshotExportCompleted?(request.id, .failure(error))
+        }
+    }
+
+    private func writePNGSnapshot(to url: URL) throws {
+        guard bounds.width > 1, bounds.height > 1 else {
+            throw ScreenshotExportError.emptyView
+        }
+
+        layoutSubtreeIfNeeded()
+        metalView.draw()
+
+        guard let rep = bitmapImageRepForCachingDisplay(in: bounds) else {
+            throw ScreenshotExportError.couldNotCreateBitmap
+        }
+        cacheDisplay(in: bounds, to: rep)
+
+        guard let data = rep.representation(using: .png, properties: [:]) else {
+            throw ScreenshotExportError.couldNotEncodePNG
+        }
+        try data.write(to: url, options: .atomic)
+    }
+
     private func currentTransform() -> ViewTransform? {
         guard let graph else { return nil }
         return currentTransform(for: graph)
@@ -452,7 +522,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             let points = graph.laneShape(lane)
             guard points.count > 1 else { continue }
             let isSelected = edge.id == selectedEdgeID
-            let color = isSelected ? selectedLaneColor() : laneColor(speed: lane.speed)
+            let color = isSelected ? selectedLaneColor() : laneColor(for: lane, edgeFunction: edge.function)
             let baseWidth = lane.width.isFinite && lane.width > 0 ? lane.width : 3.2
             let width = isSelected ? max(baseWidth * 1.8, baseWidth + 1.8) : baseWidth
             var previous = points[points.startIndex]
@@ -483,7 +553,20 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
-    private func laneColor(speed: Float) -> SIMD3<Float> {
+    private func laneColor(for lane: Lane, edgeFunction: EdgeFunction) -> SIMD3<Float> {
+        switch laneColorMode {
+        case .speedLimit:
+            return laneSpeedColor(speed: lane.speed)
+        case .laneIndex:
+            return laneIndexColor(index: lane.index)
+        case .edgeType:
+            return edgeTypeColor(edgeFunction)
+        case .uniform:
+            return SIMD3<Float>(0.58, 0.62, 0.66)
+        }
+    }
+
+    private func laneSpeedColor(speed: Float) -> SIMD3<Float> {
         let t = max(0, min((speed - 5) / 28, 1))
         let low = SIMD3<Float>(0.76, 0.36, 0.28)
         let mid = SIMD3<Float>(0.86, 0.70, 0.30)
@@ -492,6 +575,33 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             return mix(low, mid, t * 2)
         }
         return mix(mid, high, (t - 0.5) * 2)
+    }
+
+    private func laneIndexColor(index: Int16) -> SIMD3<Float> {
+        let palette = [
+            SIMD3<Float>(0.20, 0.68, 0.92),
+            SIMD3<Float>(0.86, 0.62, 0.22),
+            SIMD3<Float>(0.44, 0.74, 0.32),
+            SIMD3<Float>(0.84, 0.40, 0.56),
+            SIMD3<Float>(0.62, 0.52, 0.92),
+        ]
+        let paletteIndex = Int(abs(Int(index))) % palette.count
+        return palette[paletteIndex]
+    }
+
+    private func edgeTypeColor(_ function: EdgeFunction) -> SIMD3<Float> {
+        switch function {
+        case .normal:
+            return SIMD3<Float>(0.40, 0.66, 0.84)
+        case .connector:
+            return SIMD3<Float>(0.78, 0.60, 0.30)
+        case .crossing:
+            return SIMD3<Float>(0.70, 0.46, 0.80)
+        case .walkingArea:
+            return SIMD3<Float>(0.42, 0.70, 0.46)
+        case .internalEdge:
+            return SIMD3<Float>(0.32, 0.34, 0.36)
+        }
     }
 
     private func selectedLaneColor() -> SIMD3<Float> {
@@ -589,12 +699,30 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     }
 
     private func vehicleColor(speed: Float, typeID: UInt32) -> SIMD3<Float> {
+        switch vehicleColorMode {
+        case .speed:
+            return vehicleSpeedColor(speed: speed, typeID: typeID)
+        case .type:
+            return vehicleTypeColor(typeID: typeID)
+        case .uniform:
+            return SIMD3<Float>(0.30, 0.72, 0.88)
+        }
+    }
+
+    private func vehicleSpeedColor(speed: Float, typeID: UInt32) -> SIMD3<Float> {
         let t = max(0, min(speed / 32, 1))
         let slow = SIMD3<Float>(0.95, 0.77, 0.25)
         let fast = SIMD3<Float>(0.30, 0.70, 1.00)
         let base = mix(slow, fast, t)
         let typeTint = Float(typeID & 0xFF) / 255
         return mix(base, SIMD3<Float>(0.95, 0.95, 0.95), typeTint * 0.18)
+    }
+
+    private func vehicleTypeColor(typeID: UInt32) -> SIMD3<Float> {
+        let r = Float((typeID >> 16) & 0xFF) / 255
+        let g = Float((typeID >> 8) & 0xFF) / 255
+        let b = Float(typeID & 0xFF) / 255
+        return mix(SIMD3<Float>(r, g, b), SIMD3<Float>(0.92, 0.92, 0.92), 0.25)
     }
 
     private func selectedVehicleColor() -> SIMD3<Float> {
@@ -688,6 +816,23 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         } catch {
             NSLog("Failed to create Metal pipeline \(vertexFunction)/\(fragmentFunction): \(error.localizedDescription)")
             return nil
+        }
+    }
+}
+
+private enum ScreenshotExportError: LocalizedError {
+    case emptyView
+    case couldNotCreateBitmap
+    case couldNotEncodePNG
+
+    var errorDescription: String? {
+        switch self {
+        case .emptyView:
+            return "The network view is not visible yet."
+        case .couldNotCreateBitmap:
+            return "Could not create a bitmap for the current network view."
+        case .couldNotEncodePNG:
+            return "Could not encode the screenshot as PNG."
         }
     }
 }
