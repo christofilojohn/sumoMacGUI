@@ -198,6 +198,11 @@
       letter-spacing: 0;
     }
 
+    h1 .title-line {
+      display: block;
+      white-space: nowrap;
+    }
+
     .hero-copy {
       margin: 28px 0 0;
       max-width: 650px;
@@ -591,7 +596,9 @@
       }
 
       h1 {
-        font-size: clamp(3.4rem, 18vw, 5.6rem);
+        max-width: 7ch;
+        font-size: clamp(3rem, 15vw, 5rem);
+        line-height: 0.92;
       }
 
       .hero-actions {
@@ -646,7 +653,7 @@
     <div class="hero-content">
       <img class="hero-logo" src="Sources/SumoGUIMac/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-512.png" alt="SumoGUIMac logo">
       <p class="eyebrow">Native macOS SUMO viewer</p>
-      <h1>SumoGUIMac</h1>
+      <h1 aria-label="SumoGUIMac"><span class="title-line">Sumo</span><span class="title-line">GUI Mac</span></h1>
       <p class="hero-copy">
         A lightweight SwiftUI + Metal alternative to <code>sumo-gui</code> for opening SUMO scenarios, running or attaching over TraCI, visualizing live traffic, and inspecting the objects that matter.
       </p>

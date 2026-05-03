@@ -16,6 +16,7 @@
 		8F10000D2C00000100000001 /* ViewportState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F10000E2C00000100000001 /* ViewportState.swift */; };
 		8F10000F2C00000100000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 8F1000102C00000100000001 /* Assets.xcassets */; };
 		8F1000112C00000100000001 /* SumoKit in Frameworks */ = {isa = PBXBuildFile; productRef = 8F1000122C00000100000001 /* SumoKit */; };
+		8F1000302C00000100000001 /* VisualizationSettings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8F1000312C00000100000001 /* VisualizationSettings.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -28,6 +29,7 @@
 		8F10000E2C00000100000001 /* ViewportState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ViewportState.swift; sourceTree = "<group>"; };
 		8F1000102C00000100000001 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		8F1000132C00000100000001 /* SumoGUIMac.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SumoGUIMac.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8F1000312C00000100000001 /* VisualizationSettings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VisualizationSettings.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -101,6 +103,7 @@
 				8F10000A2C00000100000001 /* RunningSUMOSession.swift */,
 				8F10000C2C00000100000001 /* SimulationViewModel.swift */,
 				8F10000E2C00000100000001 /* ViewportState.swift */,
+				8F1000312C00000100000001 /* VisualizationSettings.swift */,
 			);
 			path = ViewModels;
 			sourceTree = "<group>";
@@ -195,6 +198,7 @@
 				8F1000092C00000100000001 /* RunningSUMOSession.swift in Sources */,
 				8F10000B2C00000100000001 /* SimulationViewModel.swift in Sources */,
 				8F10000D2C00000100000001 /* ViewportState.swift in Sources */,
+				8F1000302C00000100000001 /* VisualizationSettings.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
