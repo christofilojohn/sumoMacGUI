@@ -38,3 +38,8 @@ playground.xcworkspace/
 .env.*
 !.env.example
 docs/CHANGELOG.md
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
