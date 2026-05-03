@@ -321,6 +321,11 @@
       background: rgba(17, 21, 26, 0.94);
     }
 
+    .demo-frame figcaption code {
+      overflow-wrap: anywhere;
+      white-space: normal;
+    }
+
     .card {
       min-height: 214px;
       padding: 24px;
@@ -739,14 +744,11 @@
       <div class="section-inner">
         <div class="section-heading">
           <h2>Running live SUMO traffic, not just a mockup.</h2>
-          <p>
-            This is the included FlowDemo scenario loaded through SumoGUIMac with live vehicles, lane coloring, playback controls, and inspector metrics visible.
-          </p>
         </div>
 
         <figure class="demo-frame">
           <img src="assets/sumoguimac-flowdemo-running.png" alt="SumoGUIMac displaying the FlowDemo intersection with live vehicles, sidebars, inspector, and playback controls">
-          <figcaption>FlowDemo running from <code>Examples/FlowDemo/flowdemo.sumocfg</code> at 154 seconds with 78 live vehicles.</figcaption>
+          <figcaption>FlowDemo running from <code>flowdemo.sumocfg</code> at 154 seconds with 78 live vehicles.</figcaption>
         </figure>
       </div>
     </section>
