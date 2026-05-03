@@ -341,7 +341,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             return
         }
         let location = convert(event.locationInWindow, from: nil)
-        let screenDelta = CGPoint(x: location.x - lastDragLocation.x, y: location.y - lastDragLocation.y)
+        let screenDelta = CGPoint(x: location.x - lastDragLocation.x, y: lastDragLocation.y - location.y)
         viewport.pan(worldDelta: transform.worldDelta(forScreenDelta: screenDelta))
         self.lastDragLocation = location
         if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
