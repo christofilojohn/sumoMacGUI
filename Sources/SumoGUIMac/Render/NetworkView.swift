@@ -922,7 +922,11 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 isSelectedRoute: isSelectedRoute,
                 isHoveredRoute: isHoveredRoute
             )
-            guard RenderLOD.shouldRenderLane(worldWidth: width, scale: renderScale) else {
+            guard let renderWidth = RenderLOD.laneDisplayWorldWidth(
+                worldWidth: width,
+                scale: renderScale,
+                emphasized: isSelected || isSelectedRoute || isHoveredRoute
+            ) else {
                 continue
             }
             var previous = points[points.startIndex]
@@ -931,7 +935,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 let next = points[index]
                 let segment = LaneSegmentInstance(
                     points: SIMD4(previous.x, previous.y, next.x, next.y),
-                    style: SIMD4(color.x, color.y, color.z, width)
+                    style: SIMD4(color.x, color.y, color.z, renderWidth)
                 )
                 if isSelected {
                     selectedSegments.append(segment)
@@ -1295,8 +1299,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 isSelectedRoute: isSelectedRoute,
                 isHoveredRoute: isHoveredRoute
             )
-            guard RenderLOD.shouldRenderLane(worldWidth: width, scale: transform.scale) else { continue }
-            let renderedHalfWidth = min(max(CGFloat(width * transform.scale), 1), 18) * 0.5
+            guard let renderWidth = RenderLOD.laneDisplayWorldWidth(
+                worldWidth: width,
+                scale: transform.scale,
+                emphasized: isSelected || isSelectedRoute || isHoveredRoute
+            ) else { continue }
+            let renderedHalfWidth = min(max(CGFloat(renderWidth * transform.scale), 0.5), 18) * 0.5
             let pickThreshold = max(CGFloat(8), renderedHalfWidth + 4)
             var previous = transform.point(points[points.startIndex])
             var index = points.index(after: points.startIndex)
@@ -1406,6 +1414,7 @@ private func stableHash(_ value: String) -> UInt32 {
 
 enum RenderLOD {
     static let minimumLaneScreenWidth: Float = 0.5
+    static let maximumLaneScreenWidth: Float = 18
     static let minimumVehicleScreenSize: Float = 2
     static let defaultVehicleLength: Float = 5
     static let defaultVehicleWidth: Float = 2
@@ -1415,6 +1424,21 @@ enum RenderLOD {
             return false
         }
         return worldWidth * scale >= minimumLaneScreenWidth
+    }
+
+    static func laneDisplayWorldWidth(worldWidth: Float, scale: Float, emphasized: Bool = false) -> Float? {
+        guard shouldRenderLane(worldWidth: worldWidth, scale: scale) else {
+            return nil
+        }
+
+        let screenWidth = min(worldWidth * scale, maximumLaneScreenWidth)
+        if emphasized {
+            return screenWidth / scale
+        }
+
+        let separatorGap = min(1, max(0.22, screenWidth * 0.28))
+        let displayScreenWidth = max(minimumLaneScreenWidth, screenWidth - separatorGap)
+        return displayScreenWidth / scale
     }
 
     static func vehicleScreenSize(
@@ -1821,7 +1845,7 @@ vertex LaneVertexOut laneVertex(
     const float2 direction = screenEnd - screenStart;
     const float segmentLength = max(length(direction), 0.0001);
     const float2 normal = float2(-direction.y, direction.x) / segmentLength;
-    const float halfWidth = clamp(segment.style.w * scale, 1.0, 18.0) * 0.5;
+    const float halfWidth = clamp(segment.style.w * scale, 0.5, 18.0) * 0.5;
 
     float2 screen;
     switch (vertexID) {

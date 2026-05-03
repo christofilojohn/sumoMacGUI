@@ -9,6 +9,16 @@ final class NetworkRenderLODTests: XCTestCase {
         XCTAssertFalse(RenderLOD.shouldRenderLane(worldWidth: 3.2, scale: 0))
     }
 
+    func testLaneDisplayWidthLeavesSeparatorSpaceAtLowZoom() {
+        let displayWidth = RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 0.3)
+        XCTAssertEqual((displayWidth ?? 0) * 0.3, 0.6912, accuracy: 0.001)
+
+        let emphasizedWidth = RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 0.3, emphasized: true)
+        XCTAssertEqual(emphasizedWidth ?? 0, 3.2, accuracy: 0.001)
+
+        XCTAssertNil(RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 0.15624))
+    }
+
     func testVehicleLODUsesTwoPixelShapeThreshold() {
         XCTAssertNil(RenderLOD.vehicleScreenSize(scale: 0.399))
 
