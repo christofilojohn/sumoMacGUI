@@ -11,6 +11,20 @@ public struct LaneShape: Sendable {
     public var points: ContiguousArray<SIMD2<Float>>
 }
 
+public struct SumoColor: Sendable, Equatable {
+    public var red: UInt8
+    public var green: UInt8
+    public var blue: UInt8
+    public var alpha: UInt8
+
+    public init(red: UInt8, green: UInt8, blue: UInt8, alpha: UInt8 = 255) {
+        self.red = red
+        self.green = green
+        self.blue = blue
+        self.alpha = alpha
+    }
+}
+
 public struct SpatialIndexes: @unchecked Sendable {
     public let lanes: Quadtree<Int32>
     public let edges: Quadtree<Int32>
@@ -91,6 +105,28 @@ public struct Roundabout: Sendable {
     public var edges: [String]
 }
 
+public struct PolygonShape: Sendable {
+    public var id: String
+    public var type: String
+    public var color: SumoColor
+    public var fill: Bool
+    public var layer: Float
+    public var shapeOffset: Int32
+    public var shapeCount: Int32
+    public var bounds: SIMD4<Float>
+}
+
+public struct POI: Sendable {
+    public var id: String
+    public var type: String
+    public var color: SumoColor
+    public var position: SIMD2<Float>
+    public var layer: Float
+    public var width: Float
+    public var height: Float
+    public var imageFile: String
+}
+
 public final class NetGraph: @unchecked Sendable {
     public var location = NetLocation(netOffset: .zero, convBoundary: .zero,
                                       origBoundary: .zero, projParameter: "!")
@@ -100,8 +136,11 @@ public final class NetGraph: @unchecked Sendable {
     public var connections = ContiguousArray<Connection>()
     public var tlLogics = ContiguousArray<TrafficLightLogic>()
     public var roundabouts = ContiguousArray<Roundabout>()
+    public var polygons = ContiguousArray<PolygonShape>()
+    public var pois = ContiguousArray<POI>()
     public var laneShapePoints = ContiguousArray<SIMD2<Float>>()
     public var junctionShapePoints = ContiguousArray<SIMD2<Float>>()
+    public var polygonShapePoints = ContiguousArray<SIMD2<Float>>()
 
     public var edgeIndex: [String: Int32] = [:]
     public var laneIndex: [String: Int32] = [:]
@@ -112,10 +151,13 @@ public final class NetGraph: @unchecked Sendable {
     public func bounds() -> SIMD4<Float> {
         let declared = SIMD4<Float>(Float(location.convBoundary.x), Float(location.convBoundary.y),
                                     Float(location.convBoundary.z), Float(location.convBoundary.w))
+        let content = contentBounds()
+        if shouldIndex(declared), shouldIndex(content) {
+            return unionBounds(declared, content)
+        }
         if shouldIndex(declared) {
             return declared
         }
-        let content = contentBounds()
         if shouldIndex(content) {
             return content
         }
@@ -131,6 +173,11 @@ public final class NetGraph: @unchecked Sendable {
         let lo = Int(j.shapeOffset)
         let hi = lo + Int(j.shapeCount)
         return junctionShapePoints[lo..<hi]
+    }
+    public func polygonShape(_ polygon: PolygonShape) -> ArraySlice<SIMD2<Float>> {
+        let lo = Int(polygon.shapeOffset)
+        let hi = lo + Int(polygon.shapeCount)
+        return polygonShapePoints[lo..<hi]
     }
 
     public func makeSpatialIndexes(includeInternalEdges: Bool = false) -> SpatialIndexes {
@@ -167,6 +214,12 @@ public final class NetGraph: @unchecked Sendable {
                 ? junction.bounds
                 : SIMD4(junction.position.x, junction.position.y, junction.position.x, junction.position.y)
             b = unionBounds(b, jb)
+        }
+        for polygon in polygons where shouldIndex(polygon.bounds) {
+            b = unionBounds(b, polygon.bounds)
+        }
+        for poi in pois {
+            b = unionBounds(b, SIMD4(poi.position.x, poi.position.y, poi.position.x, poi.position.y))
         }
         return b
     }

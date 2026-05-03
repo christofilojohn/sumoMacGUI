@@ -39,6 +39,10 @@ final class NetXMLParserTests: XCTestCase {
         let lane = g.lanes[Int(e1.laneRange.lowerBound)]
         XCTAssertEqual(lane.id, "e1_0")
         XCTAssertGreaterThan(lane.length, 90)
+        XCTAssertEqual(g.location.projParameter, "!")
+        XCTAssertEqual(g.location.convBoundary, SIMD4<Double>(0, 0, 200, 0))
+        XCTAssertEqual(Array(g.laneShape(lane)).first, SIMD2<Float>(0, -1.6))
+        XCTAssertEqual(g.bounds(), SIMD4<Float>(0, -3.2, 200, 0))
     }
 
     func testParsesTrafficLightRoundaboutAndConnectionMetadata() throws {
@@ -58,6 +62,13 @@ final class NetXMLParserTests: XCTestCase {
         XCTAssertEqual(g.connections.count, 1)
         XCTAssertEqual(g.connections[0].trafficLightID, "j1")
         XCTAssertEqual(g.connections[0].linkIndex, 0)
+        XCTAssertEqual(g.polygons.count, 1)
+        XCTAssertEqual(g.polygons[0].id, "zone0")
+        XCTAssertEqual(g.polygons[0].color, SumoColor(red: 60, green: 140, blue: 95, alpha: 180))
+        XCTAssertEqual(Array(g.polygonShape(g.polygons[0])).count, 4)
+        XCTAssertEqual(g.pois.count, 1)
+        XCTAssertEqual(g.pois[0].id, "poi0")
+        XCTAssertEqual(g.pois[0].position, SIMD2<Float>(50, 5))
 
         let junction = g.junctions[Int(g.junctionIndex["j1"]!)]
         XCTAssertEqual(junction.incomingLanes, ["a_0"])
@@ -73,6 +84,46 @@ final class NetXMLParserTests: XCTestCase {
         qt.query(in: SIMD4(110, -5, 220, 5)) { hits.insert($0) }
         XCTAssertTrue(hits.contains(g.edgeIndex["e2"]!))
         XCTAssertFalse(hits.contains(g.edgeIndex["e1"]!))
+    }
+
+    func testSpatialIndexesCoverLanesEdgesAndJunctionsAndFilterInternalEdges() throws {
+        let g = try NetXMLParser.parse(url: try tinyURL())
+
+        let external = g.makeSpatialIndexes()
+        let all = g.makeSpatialIndexes(includeInternalEdges: true)
+
+        let wholeNetwork = SIMD4<Float>(-10, -10, 210, 10)
+        let externalEdges = Set(external.edges.query(in: wholeNetwork).map { g.edges[Int($0)].id })
+        let allEdges = Set(all.edges.query(in: wholeNetwork).map { g.edges[Int($0)].id })
+        let laneIDs = Set(external.lanes.query(in: wholeNetwork).map { g.lanes[Int($0)].id })
+        let tightLaneIDs = Set(external.lanes.query(in: SIMD4<Float>(0, -1.6, 200, -1.6)).map { g.lanes[Int($0)].id })
+        let junctionIDs = Set(external.junctions.query(in: wholeNetwork).map { g.junctions[Int($0)].id })
+
+        XCTAssertTrue(externalEdges.contains("e1"))
+        XCTAssertTrue(externalEdges.contains("e2"))
+        XCTAssertFalse(externalEdges.contains(":j1_0"))
+        XCTAssertTrue(allEdges.contains(":j1_0"))
+        XCTAssertTrue(laneIDs.contains("e1_0"))
+        XCTAssertTrue(laneIDs.contains("e2_0"))
+        XCTAssertTrue(tightLaneIDs.contains("e1_0"))
+        XCTAssertTrue(tightLaneIDs.contains("e2_0"))
+        XCTAssertTrue(junctionIDs.isSuperset(of: ["j0", "j1", "j2"]))
+    }
+
+    func testGraphFallsBackToContentBoundsWhenDeclaredBoundaryIsInvalid() {
+        let graph = NetGraph()
+        graph.location.convBoundary = SIMD4(50, 0, 10, 0)
+        graph.edges.append(Edge(
+            id: "e",
+            fromJunction: "a",
+            toJunction: "b",
+            function: .normal,
+            priority: 1,
+            laneRange: 0..<0,
+            bounds: SIMD4(10, -2, 50, 2)
+        ))
+
+        XCTAssertEqual(graph.bounds(), SIMD4<Float>(10, -2, 50, 2))
     }
 
     func testQuadtreeDoesNotDuplicateEntriesThatSpanChildCells() {

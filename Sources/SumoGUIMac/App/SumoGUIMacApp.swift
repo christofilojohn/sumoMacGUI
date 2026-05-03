@@ -26,6 +26,26 @@ struct SumoGUIMacApp: App {
                 }
                 .keyboardShortcut("o", modifiers: .command)
 
+                Menu("Open Recent") {
+                    if simulation.recentDocuments.isEmpty {
+                        Button("No Recent SUMO Files") {}
+                            .disabled(true)
+                    } else {
+                        ForEach(simulation.recentDocuments) { document in
+                            Button(document.title) {
+                                simulation.openRecentDocument(document)
+                            }
+                            .help(document.location)
+                        }
+
+                        Divider()
+
+                        Button("Clear Menu") {
+                            simulation.clearRecentDocuments()
+                        }
+                    }
+                }
+
                 Button("Attach to TraCI...") {
                     simulation.presentAttachPanel()
                 }
@@ -38,8 +58,25 @@ struct SumoGUIMacApp: App {
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(simulation.graph == nil)
+
+                Divider()
+
+                Button("Import Visualization Settings...") {
+                    simulation.presentImportVisualizationSettingsPanel()
+                }
+
+                Button("Export Visualization Settings...") {
+                    simulation.presentExportVisualizationSettingsPanel()
+                }
             }
             CommandMenu("View") {
+                Button("Visualization Settings...") {
+                    simulation.presentVisualizationSettings()
+                }
+                .keyboardShortcut(",", modifiers: .command)
+
+                Divider()
+
                 Button("Fit Network") {
                     viewport.requestFit()
                 }

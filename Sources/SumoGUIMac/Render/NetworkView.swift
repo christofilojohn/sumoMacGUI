@@ -10,12 +10,24 @@ struct NetworkView: NSViewRepresentable {
     let viewport: ViewportState
     let selectedEdgeID: String?
     let selectedVehicleID: String?
+    let selectedEdgeIDs: Set<String>
+    let selectedVehicleIDs: Set<String>
+    let selectedRouteEdgeIDs: Set<String>
+    let hoveredRouteEdgeIDs: Set<String>
     let laneColorMode: LaneColorMode
     let vehicleColorMode: VehicleColorMode
+    let junctionColorMode: JunctionColorMode
+    let laneOccupancyByID: [String: Float]
+    let junctionLoadByID: [String: Int]
+    let showPolygons: Bool
+    let showPOIs: Bool
+    let backgroundDecal: BackgroundDecal?
+    let palette: VisualizationPalette
     let screenshotExportRequest: SimulationViewModel.ScreenshotExportRequest?
     let onScreenshotExportCompleted: (UUID, Result<URL, Error>) -> Void
     let onVisibleWorldBoundsChanged: (SIMD4<Float>) -> Void
     let onVehiclePicked: (String?) -> Void
+    let onVehicleHovered: (String?) -> Void
     let onEdgePicked: (String?) -> Void
 
     func makeNSView(context: Context) -> NetworkMetalView {
@@ -23,11 +35,23 @@ struct NetworkView: NSViewRepresentable {
         view.viewport = viewport
         view.selectedEdgeID = selectedEdgeID
         view.selectedVehicleID = selectedVehicleID
+        view.selectedEdgeIDs = selectedEdgeIDs
+        view.selectedVehicleIDs = selectedVehicleIDs
+        view.selectedRouteEdgeIDs = selectedRouteEdgeIDs
+        view.hoveredRouteEdgeIDs = hoveredRouteEdgeIDs
         view.laneColorMode = laneColorMode
         view.vehicleColorMode = vehicleColorMode
+        view.junctionColorMode = junctionColorMode
+        view.laneOccupancyByID = laneOccupancyByID
+        view.junctionLoadByID = junctionLoadByID
+        view.showPolygons = showPolygons
+        view.showPOIs = showPOIs
+        view.backgroundDecal = backgroundDecal
+        view.palette = palette
         view.onScreenshotExportCompleted = onScreenshotExportCompleted
         view.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         view.onVehiclePicked = onVehiclePicked
+        view.onVehicleHovered = onVehicleHovered
         view.onEdgePicked = onEdgePicked
         view.screenshotExportRequest = screenshotExportRequest
         return view
@@ -39,11 +63,23 @@ struct NetworkView: NSViewRepresentable {
         nsView.simulationState = simulationState
         nsView.selectedEdgeID = selectedEdgeID
         nsView.selectedVehicleID = selectedVehicleID
+        nsView.selectedEdgeIDs = selectedEdgeIDs
+        nsView.selectedVehicleIDs = selectedVehicleIDs
+        nsView.selectedRouteEdgeIDs = selectedRouteEdgeIDs
+        nsView.hoveredRouteEdgeIDs = hoveredRouteEdgeIDs
         nsView.laneColorMode = laneColorMode
         nsView.vehicleColorMode = vehicleColorMode
+        nsView.junctionColorMode = junctionColorMode
+        nsView.laneOccupancyByID = laneOccupancyByID
+        nsView.junctionLoadByID = junctionLoadByID
+        nsView.showPolygons = showPolygons
+        nsView.showPOIs = showPOIs
+        nsView.backgroundDecal = backgroundDecal
+        nsView.palette = palette
         nsView.onScreenshotExportCompleted = onScreenshotExportCompleted
         nsView.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         nsView.onVehiclePicked = onVehiclePicked
+        nsView.onVehicleHovered = onVehicleHovered
         nsView.onEdgePicked = onEdgePicked
         nsView.screenshotExportRequest = screenshotExportRequest
     }
@@ -57,15 +93,25 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private let metalView = PassthroughMTKView()
     private var device: MTLDevice?
     private var commandQueue: MTLCommandQueue?
+    private var backgroundPipeline: MTLRenderPipelineState?
     private var junctionPipeline: MTLRenderPipelineState?
     private var lanePipeline: MTLRenderPipelineState?
     private var vehiclePipeline: MTLRenderPipelineState?
+    private var backgroundTexture: MTLTexture?
+    private var backgroundVertexBuffer: MTLBuffer?
+    private var backgroundVertexCount = 0
+    private var polygonVertexBuffer: MTLBuffer?
+    private var polygonVertexCount = 0
+    private var poiVertexBuffer: MTLBuffer?
+    private var poiVertexCount = 0
     private var junctionVertexBuffer: MTLBuffer?
     private var junctionVertexCount = 0
     private var laneSegmentBuffer: MTLBuffer?
     private var laneSegmentCount = 0
+    private var lastLaneLODScale: Float?
     private var vehicleInstanceBuffer: MTLBuffer?
     private var vehicleInstanceCount = 0
+    private var lastVehicleLODScale: Float?
     private var lastDragLocation: CGPoint?
     private var mouseDownLocation: CGPoint?
     private var didDragBeyondClickSlop = false
@@ -77,15 +123,22 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var vehicleAnimationTarget: [String: VehicleRenderSample] = [:]
     private var magnifyEventMonitor: Any?
     private var handledScreenshotRequestID: UUID?
+    private var lastHoveredVehicleID: String?
     var onScreenshotExportCompleted: ((UUID, Result<URL, Error>) -> Void)?
     var onVisibleWorldBoundsChanged: ((SIMD4<Float>) -> Void)?
     var onVehiclePicked: ((String?) -> Void)?
+    var onVehicleHovered: ((String?) -> Void)?
     var onEdgePicked: ((String?) -> Void)?
 
     var graph: NetGraph? {
         didSet {
             if graph !== oldValue {
                 viewport?.requestFit()
+                lastLaneLODScale = nil
+                lastVehicleLODScale = nil
+                rebuildBackgroundBuffer()
+                rebuildPolygonBuffer()
+                rebuildPOIBuffer()
                 rebuildJunctionBuffer()
                 rebuildLaneBuffer()
             }
@@ -114,6 +167,37 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
+    var selectedEdgeIDs: Set<String> = [] {
+        didSet {
+            guard selectedEdgeIDs != oldValue else { return }
+            rebuildLaneBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var selectedVehicleIDs: Set<String> = [] {
+        didSet {
+            guard selectedVehicleIDs != oldValue else { return }
+            updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
+        }
+    }
+
+    var selectedRouteEdgeIDs: Set<String> = [] {
+        didSet {
+            guard selectedRouteEdgeIDs != oldValue else { return }
+            rebuildLaneBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var hoveredRouteEdgeIDs: Set<String> = [] {
+        didSet {
+            guard hoveredRouteEdgeIDs != oldValue else { return }
+            rebuildLaneBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
     var laneColorMode: LaneColorMode = .speedLimit {
         didSet {
             guard laneColorMode != oldValue else { return }
@@ -125,6 +209,69 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     var vehicleColorMode: VehicleColorMode = .speed {
         didSet {
             guard vehicleColorMode != oldValue else { return }
+            updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
+        }
+    }
+
+    var junctionColorMode: JunctionColorMode = .type {
+        didSet {
+            guard junctionColorMode != oldValue else { return }
+            rebuildJunctionBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var laneOccupancyByID: [String: Float] = [:] {
+        didSet {
+            guard laneColorMode == .occupancy, laneOccupancyByID != oldValue else { return }
+            rebuildLaneBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var junctionLoadByID: [String: Int] = [:] {
+        didSet {
+            guard junctionColorMode == .load, junctionLoadByID != oldValue else { return }
+            rebuildJunctionBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var showPolygons = true {
+        didSet {
+            guard showPolygons != oldValue else { return }
+            rebuildPolygonBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var showPOIs = true {
+        didSet {
+            guard showPOIs != oldValue else { return }
+            rebuildPOIBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var backgroundDecal: BackgroundDecal? {
+        didSet {
+            guard backgroundDecal != oldValue else { return }
+            if backgroundDecal?.url != oldValue?.url {
+                loadBackgroundTexture()
+            }
+            rebuildBackgroundBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var palette = VisualizationPalette() {
+        didSet {
+            guard palette != oldValue else { return }
+            rebuildBackgroundBuffer()
+            rebuildPolygonBuffer()
+            rebuildPOIBuffer()
+            rebuildJunctionBuffer()
+            rebuildLaneBuffer()
             updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
         }
     }
@@ -198,12 +345,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         self.lastDragLocation = location
         if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
             didDragBeyondClickSlop = true
+            updateHoveredVehicle(nil)
         }
     }
 
     override func mouseExited(with event: NSEvent) {
         lastDragLocation = nil
         mouseDownLocation = nil
+        updateHoveredVehicle(nil)
     }
 
     override var mouseDownCanMoveWindow: Bool {
@@ -216,6 +365,8 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
     override func mouseMoved(with event: NSEvent) {
         NSCursor.openHand.set()
+        let location = convert(event.locationInWindow, from: nil)
+        updateHoveredVehicle(nearestVehicleID(at: location))
     }
 
     override func mouseEntered(with event: NSEvent) {
@@ -230,6 +381,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
         let location = convert(event.locationInWindow, from: nil)
         let zoomModifierActive = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option)
+        updateHoveredVehicle(nil)
         if event.hasPreciseScrollingDeltas, !zoomModifierActive {
             let delta = CGPoint(x: event.scrollingDeltaX, y: event.scrollingDeltaY)
             viewport.pan(worldDelta: transform.worldDelta(forScreenDelta: delta))
@@ -259,6 +411,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         } else if event.clickCount == 1, !didDragBeyondClickSlop {
             pickObject(at: location)
         }
+        updateHoveredVehicle(nearestVehicleID(at: location))
         lastDragLocation = nil
         mouseDownLocation = nil
         didDragBeyondClickSlop = false
@@ -277,6 +430,40 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
         if
             let graph,
+            let pipeline = backgroundPipeline,
+            let backgroundTexture,
+            let backgroundVertexBuffer,
+            backgroundVertexCount > 0,
+            bounds.width > 10,
+            bounds.height > 10
+        {
+            let transform = currentTransform(for: graph)
+            var uniforms = LaneViewportUniforms(transform: transform, viewSize: bounds.size)
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(backgroundVertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
+            encoder.setFragmentTexture(backgroundTexture, index: 0)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: backgroundVertexCount)
+        }
+
+        if
+            let graph,
+            let pipeline = junctionPipeline,
+            let polygonVertexBuffer,
+            polygonVertexCount > 0,
+            bounds.width > 10,
+            bounds.height > 10
+        {
+            let transform = currentTransform(for: graph)
+            var uniforms = LaneViewportUniforms(transform: transform, viewSize: bounds.size)
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(polygonVertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: polygonVertexCount)
+        }
+
+        if
+            let graph,
             let pipeline = junctionPipeline,
             let junctionVertexBuffer,
             junctionVertexCount > 0,
@@ -290,6 +477,23 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
             encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: junctionVertexCount)
         }
+
+        if
+            let graph,
+            let pipeline = junctionPipeline,
+            let poiVertexBuffer,
+            poiVertexCount > 0,
+            bounds.width > 10,
+            bounds.height > 10
+        {
+            let transform = currentTransform(for: graph)
+            var uniforms = LaneViewportUniforms(transform: transform, viewSize: bounds.size)
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(poiVertexBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: poiVertexCount)
+        }
+
 
         if
             let graph,
@@ -339,6 +543,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         metalView.clearColor = MTLClearColor(red: 0.055, green: 0.058, blue: 0.064, alpha: 1)
         metalView.colorPixelFormat = .bgra8Unorm
         commandQueue = device?.makeCommandQueue()
+        backgroundPipeline = makeRenderPipeline(
+            device: device,
+            colorPixelFormat: metalView.colorPixelFormat,
+            vertexFunction: "backgroundVertex",
+            fragmentFunction: "backgroundFragment"
+        )
         junctionPipeline = makeRenderPipeline(
             device: device,
             colorPixelFormat: metalView.colorPixelFormat,
@@ -406,6 +616,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
         let transform = currentTransform(for: graph)
         reportVisibleBounds(transform: transform)
+        refreshLODDependentBuffers(transform: transform)
         metalView.setNeedsDisplay(bounds)
     }
 
@@ -453,8 +664,123 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             viewSize: bounds.size,
             inset: inset,
             center: viewport?.center,
-            pointsPerWorldUnit: viewport?.pointsPerWorldUnit
+            pointsPerWorldUnit: viewport?.pointsPerWorldUnit,
+            rotationRadians: viewport?.rotationRadians ?? 0
         )
+    }
+
+    private func loadBackgroundTexture() {
+        guard let device, let url = backgroundDecal?.url else {
+            backgroundTexture = nil
+            return
+        }
+        do {
+            backgroundTexture = try MTKTextureLoader(device: device).newTexture(
+                URL: url,
+                options: [
+                    MTKTextureLoader.Option.SRGB: false,
+                    MTKTextureLoader.Option.origin: MTKTextureLoader.Origin.bottomLeft,
+                ]
+            )
+        } catch {
+            backgroundTexture = nil
+            NSLog("Failed to load background decal \(url.path): \(error.localizedDescription)")
+        }
+    }
+
+    private func rebuildBackgroundBuffer() {
+        guard let device, let decal = backgroundDecal, backgroundTexture != nil else {
+            backgroundVertexBuffer = nil
+            backgroundVertexCount = 0
+            return
+        }
+        let rect = decal.worldRect
+        let tint = SIMD4(
+            palette.backgroundTint.red,
+            palette.backgroundTint.green,
+            palette.backgroundTint.blue,
+            max(0, min(decal.opacity, 1)) * palette.backgroundTint.alpha
+        )
+        let vertices = [
+            BackgroundRenderVertex(position: SIMD2(rect.x, rect.y), texCoord: SIMD2(0, 0), tint: tint),
+            BackgroundRenderVertex(position: SIMD2(rect.z, rect.y), texCoord: SIMD2(1, 0), tint: tint),
+            BackgroundRenderVertex(position: SIMD2(rect.x, rect.w), texCoord: SIMD2(0, 1), tint: tint),
+            BackgroundRenderVertex(position: SIMD2(rect.x, rect.w), texCoord: SIMD2(0, 1), tint: tint),
+            BackgroundRenderVertex(position: SIMD2(rect.z, rect.y), texCoord: SIMD2(1, 0), tint: tint),
+            BackgroundRenderVertex(position: SIMD2(rect.z, rect.w), texCoord: SIMD2(1, 1), tint: tint),
+        ]
+        backgroundVertexCount = vertices.count
+        backgroundVertexBuffer = vertices.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+        }
+    }
+
+    private func rebuildPolygonBuffer() {
+        guard let graph, let device, showPolygons else {
+            polygonVertexBuffer = nil
+            polygonVertexCount = 0
+            return
+        }
+
+        var vertices: [JunctionRenderVertex] = []
+        for polygon in graph.polygons.sorted(by: { $0.layer < $1.layer }) {
+            let shape = graph.polygonShape(polygon)
+            guard shape.count > 2, let first = shape.first else { continue }
+            let color = polygonColor(polygon)
+            var previousIndex = shape.index(after: shape.startIndex)
+            var nextIndex = shape.index(after: previousIndex)
+            while nextIndex < shape.endIndex {
+                vertices.append(JunctionRenderVertex(position: first, color: color))
+                vertices.append(JunctionRenderVertex(position: shape[previousIndex], color: color))
+                vertices.append(JunctionRenderVertex(position: shape[nextIndex], color: color))
+                previousIndex = nextIndex
+                nextIndex = shape.index(after: nextIndex)
+            }
+        }
+
+        polygonVertexCount = vertices.count
+        guard vertices.isEmpty == false else {
+            polygonVertexBuffer = nil
+            return
+        }
+        polygonVertexBuffer = vertices.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+        }
+    }
+
+    private func rebuildPOIBuffer() {
+        guard let graph, let device, showPOIs else {
+            poiVertexBuffer = nil
+            poiVertexCount = 0
+            return
+        }
+
+        var vertices: [JunctionRenderVertex] = []
+        for poi in graph.pois.sorted(by: { $0.layer < $1.layer }) {
+            let halfWidth = max(poi.width, 6) * 0.5
+            let halfHeight = max(poi.height, 6) * 0.5
+            let center = poi.position
+            let color = poiColor(poi)
+            let bottom = SIMD2(center.x, center.y - halfHeight)
+            let right = SIMD2(center.x + halfWidth, center.y)
+            let top = SIMD2(center.x, center.y + halfHeight)
+            let left = SIMD2(center.x - halfWidth, center.y)
+            vertices.append(JunctionRenderVertex(position: bottom, color: color))
+            vertices.append(JunctionRenderVertex(position: right, color: color))
+            vertices.append(JunctionRenderVertex(position: top, color: color))
+            vertices.append(JunctionRenderVertex(position: bottom, color: color))
+            vertices.append(JunctionRenderVertex(position: top, color: color))
+            vertices.append(JunctionRenderVertex(position: left, color: color))
+        }
+
+        poiVertexCount = vertices.count
+        guard vertices.isEmpty == false else {
+            poiVertexBuffer = nil
+            return
+        }
+        poiVertexBuffer = vertices.withUnsafeBytes { bytes in
+            device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+        }
     }
 
     private func rebuildJunctionBuffer() {
@@ -469,7 +795,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         for junction in graph.junctions {
             let shape = graph.junctionShape(junction)
             guard shape.count > 2, let first = shape.first else { continue }
-            let color = junctionColor(type: junction.type)
+            let color = junctionColor(junction)
             var previousIndex = shape.index(after: shape.startIndex)
             var nextIndex = shape.index(after: previousIndex)
             while nextIndex < shape.endIndex {
@@ -491,7 +817,23 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
-    private func junctionColor(type: String) -> SIMD4<Float> {
+    private func junctionColor(_ junction: Junction) -> SIMD4<Float> {
+        switch junctionColorMode {
+        case .type:
+            return junctionTypeColor(type: junction.type)
+        case .load:
+            let liveLoad = Float(junctionLoadByID[junction.id] ?? junction.incomingLanes.count)
+            let t = max(0, min(liveLoad / 12, 1))
+            let low = SIMD3<Float>(0.20, 0.32, 0.42)
+            let high = SIMD3<Float>(0.95, 0.42, 0.24)
+            let color = mix(low, high, t)
+            return SIMD4(color.x, color.y, color.z, 1)
+        case .uniform:
+            return palette.junctionUniform.simd
+        }
+    }
+
+    private func junctionTypeColor(type: String) -> SIMD4<Float> {
         switch type {
         case "traffic_light":
             return SIMD4(0.27, 0.34, 0.42, 1)
@@ -502,13 +844,52 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
-    private func rebuildLaneBuffer() {
+    private func polygonColor(_ polygon: PolygonShape) -> SIMD4<Float> {
+        let parsed = VisualizationColor(sumoColor: polygon.color).simd
+        let fallback = palette.polygonFill.simd
+        if polygon.color == SumoColor(red: 96, green: 130, blue: 166, alpha: 180) {
+            return fallback
+        }
+        return SIMD4(parsed.x, parsed.y, parsed.z, polygon.fill ? min(parsed.w, 0.65) : 0.30)
+    }
+
+    private func poiColor(_ poi: POI) -> SIMD4<Float> {
+        if poi.color == SumoColor(red: 247, green: 192, blue: 74, alpha: 255) {
+            return palette.poi.simd
+        }
+        return VisualizationColor(sumoColor: poi.color).simd
+    }
+
+    private func refreshLODDependentBuffers(transform: ViewTransform) {
+        if shouldRebuildLODBuffer(previousScale: lastLaneLODScale, nextScale: transform.scale) {
+            rebuildLaneBuffer(scale: transform.scale)
+        }
+        if shouldRebuildLODBuffer(previousScale: lastVehicleLODScale, nextScale: transform.scale) {
+            updateVehicleBuffer(samples: currentVehicleSamplesForDisplay(), scale: transform.scale)
+        }
+    }
+
+    private func shouldRebuildLODBuffer(previousScale: Float?, nextScale: Float) -> Bool {
+        guard nextScale.isFinite else { return false }
+        guard let previousScale, previousScale.isFinite else { return true }
+        return abs(previousScale - nextScale) > Float.ulpOfOne
+    }
+
+    private func currentRenderScale() -> Float {
+        viewport?.pointsPerWorldUnit ?? 1
+    }
+
+    private func rebuildLaneBuffer(scale: Float? = nil) {
         guard let graph, let device else {
             laneSegmentBuffer = nil
             laneSegmentCount = 0
+            lastLaneLODScale = nil
             return
         }
+        let renderScale = scale ?? currentRenderScale()
         var segments: [LaneSegmentInstance] = []
+        var hoverSegments: [LaneSegmentInstance] = []
+        var routeSegments: [LaneSegmentInstance] = []
         var selectedSegments: [LaneSegmentInstance] = []
         segments.reserveCapacity(graph.lanes.count * 2)
         for lane in graph.lanes {
@@ -521,10 +902,28 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             }
             let points = graph.laneShape(lane)
             guard points.count > 1 else { continue }
-            let isSelected = edge.id == selectedEdgeID
-            let color = isSelected ? selectedLaneColor() : laneColor(for: lane, edgeFunction: edge.function)
+            let isSelected = edge.id == selectedEdgeID || selectedEdgeIDs.contains(edge.id)
+            let isSelectedRoute = !isSelected && selectedRouteEdgeIDs.contains(edge.id)
+            let isHoveredRoute = !isSelected && !isSelectedRoute && hoveredRouteEdgeIDs.contains(edge.id)
+            let laneCount = max(edge.laneRange.count, 1)
+            let color = laneSegmentColor(
+                lane: lane,
+                edgeFunction: edge.function,
+                laneCount: laneCount,
+                isSelected: isSelected,
+                isSelectedRoute: isSelectedRoute,
+                isHoveredRoute: isHoveredRoute
+            )
             let baseWidth = lane.width.isFinite && lane.width > 0 ? lane.width : 3.2
-            let width = isSelected ? max(baseWidth * 1.8, baseWidth + 1.8) : baseWidth
+            let width = laneSegmentWidth(
+                baseWidth: baseWidth,
+                isSelected: isSelected,
+                isSelectedRoute: isSelectedRoute,
+                isHoveredRoute: isHoveredRoute
+            )
+            guard RenderLOD.shouldRenderLane(worldWidth: width, scale: renderScale) else {
+                continue
+            }
             var previous = points[points.startIndex]
             var index = points.index(after: points.startIndex)
             while index < points.endIndex {
@@ -535,6 +934,10 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 )
                 if isSelected {
                     selectedSegments.append(segment)
+                } else if isSelectedRoute {
+                    routeSegments.append(segment)
+                } else if isHoveredRoute {
+                    hoverSegments.append(segment)
                 } else {
                     segments.append(segment)
                 }
@@ -542,6 +945,9 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 index = points.index(after: index)
             }
         }
+        lastLaneLODScale = renderScale
+        segments.append(contentsOf: hoverSegments)
+        segments.append(contentsOf: routeSegments)
         segments.append(contentsOf: selectedSegments)
         laneSegmentCount = segments.count
         guard segments.isEmpty == false else {
@@ -553,16 +959,57 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
-    private func laneColor(for lane: Lane, edgeFunction: EdgeFunction) -> SIMD3<Float> {
+    private func laneSegmentColor(
+        lane: Lane,
+        edgeFunction: EdgeFunction,
+        laneCount: Int,
+        isSelected: Bool,
+        isSelectedRoute: Bool,
+        isHoveredRoute: Bool
+    ) -> SIMD3<Float> {
+        if isSelected {
+            return selectedLaneColor()
+        }
+        if isSelectedRoute {
+            return selectedRouteColor()
+        }
+        if isHoveredRoute {
+            return hoveredRouteColor()
+        }
+        return laneColor(for: lane, edgeFunction: edgeFunction, laneCount: laneCount)
+    }
+
+    private func laneSegmentWidth(
+        baseWidth: Float,
+        isSelected: Bool,
+        isSelectedRoute: Bool,
+        isHoveredRoute: Bool
+    ) -> Float {
+        if isSelected {
+            return max(baseWidth * 1.8, baseWidth + 1.8)
+        }
+        if isSelectedRoute {
+            return max(baseWidth * 1.45, baseWidth + 1.2)
+        }
+        if isHoveredRoute {
+            return max(baseWidth * 1.3, baseWidth + 0.8)
+        }
+        return baseWidth
+    }
+
+    private func laneColor(for lane: Lane, edgeFunction: EdgeFunction, laneCount: Int) -> SIMD3<Float> {
         switch laneColorMode {
         case .speedLimit:
             return laneSpeedColor(speed: lane.speed)
-        case .laneIndex:
-            return laneIndexColor(index: lane.index)
+        case .laneNumber:
+            return laneNumberColor(count: laneCount)
+        case .occupancy:
+            return laneOccupancyColor(occupancy: laneOccupancyByID[lane.id] ?? 0)
         case .edgeType:
             return edgeTypeColor(edgeFunction)
         case .uniform:
-            return SIMD3<Float>(0.58, 0.62, 0.66)
+            let color = palette.laneUniform
+            return SIMD3(color.red, color.green, color.blue)
         }
     }
 
@@ -577,7 +1024,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         return mix(mid, high, (t - 0.5) * 2)
     }
 
-    private func laneIndexColor(index: Int16) -> SIMD3<Float> {
+    private func laneNumberColor(count: Int) -> SIMD3<Float> {
         let palette = [
             SIMD3<Float>(0.20, 0.68, 0.92),
             SIMD3<Float>(0.86, 0.62, 0.22),
@@ -585,8 +1032,19 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             SIMD3<Float>(0.84, 0.40, 0.56),
             SIMD3<Float>(0.62, 0.52, 0.92),
         ]
-        let paletteIndex = Int(abs(Int(index))) % palette.count
+        let paletteIndex = max(count - 1, 0) % palette.count
         return palette[paletteIndex]
+    }
+
+    private func laneOccupancyColor(occupancy: Float) -> SIMD3<Float> {
+        let t = max(0, min(occupancy / 100, 1))
+        let low = SIMD3<Float>(0.22, 0.70, 0.58)
+        let mid = SIMD3<Float>(0.90, 0.72, 0.24)
+        let high = SIMD3<Float>(0.88, 0.28, 0.24)
+        if t < 0.5 {
+            return mix(low, mid, t * 2)
+        }
+        return mix(mid, high, (t - 0.5) * 2)
     }
 
     private func edgeTypeColor(_ function: EdgeFunction) -> SIMD3<Float> {
@@ -606,6 +1064,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
     private func selectedLaneColor() -> SIMD3<Float> {
         SIMD3<Float>(1.00, 0.90, 0.28)
+    }
+
+    private func selectedRouteColor() -> SIMD3<Float> {
+        SIMD3<Float>(1.00, 0.52, 0.18)
+    }
+
+    private func hoveredRouteColor() -> SIMD3<Float> {
+        SIMD3<Float>(0.45, 0.76, 1.00)
     }
 
     private func rebuildVehicleBuffer() {
@@ -672,7 +1138,9 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         }
     }
 
-    private func updateVehicleBuffer(samples: [VehicleRenderSample]) {
+    private func updateVehicleBuffer(samples: [VehicleRenderSample], scale: Float? = nil) {
+        let renderScale = scale ?? currentRenderScale()
+        lastVehicleLODScale = renderScale
         guard let device, samples.isEmpty == false else {
             vehicleInstanceBuffer = nil
             vehicleInstanceCount = 0
@@ -683,29 +1151,50 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         var instances: [VehicleInstance] = []
         instances.reserveCapacity(samples.count)
         for vehicle in samples {
-            let color = vehicle.id == selectedVehicleID
-                ? selectedVehicleColor()
-                : vehicleColor(speed: vehicle.speed, typeID: vehicle.typeID)
+            guard let size = RenderLOD.vehicleScreenSize(scale: renderScale) else {
+                continue
+            }
+            let isSelected = vehicle.id == selectedVehicleID || selectedVehicleIDs.contains(vehicle.id)
+            let color = isSelected ? selectedVehicleColor() : vehicleColor(for: vehicle)
             instances.append(VehicleInstance(
                 pose: SIMD4(vehicle.position.x, vehicle.position.y, vehicle.angle, vehicle.speed),
-                color: SIMD4(color.x, color.y, color.z, 1)
+                color: SIMD4(color.x, color.y, color.z, 1),
+                metrics: SIMD4(size.x, size.y, 0, 0)
             ))
         }
         vehicleInstanceCount = instances.count
+        guard instances.isEmpty == false else {
+            vehicleInstanceBuffer = nil
+            metalView.setNeedsDisplay(bounds)
+            return
+        }
         vehicleInstanceBuffer = instances.withUnsafeBytes { bytes in
             device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
         }
         metalView.setNeedsDisplay(bounds)
     }
 
-    private func vehicleColor(speed: Float, typeID: UInt32) -> SIMD3<Float> {
+    private func vehicleColor(for vehicle: VehicleRenderSample) -> SIMD3<Float> {
         switch vehicleColorMode {
         case .speed:
-            return vehicleSpeedColor(speed: speed, typeID: typeID)
+            return vehicleSpeedColor(speed: vehicle.speed, typeID: vehicle.typeID)
+        case .acceleration:
+            return vehicleAccelerationColor(acceleration: vehicle.acceleration ?? 0)
+        case .route:
+            return vehicleRouteColor(routeID: vehicle.routeID)
         case .type:
-            return vehicleTypeColor(typeID: typeID)
+            return vehicleTypeColor(typeID: vehicle.typeID)
+        case .co2:
+            return vehicleCO2Color(co2Emission: vehicle.co2Emission ?? 0)
+        case .colorAttribute:
+            if let color = vehicle.color {
+                let parsed = VisualizationColor(sumoColor: color)
+                return SIMD3(parsed.red, parsed.green, parsed.blue)
+            }
+            return vehicleTypeColor(typeID: vehicle.typeID)
         case .uniform:
-            return SIMD3<Float>(0.30, 0.72, 0.88)
+            let color = palette.vehicleUniform
+            return SIMD3(color.red, color.green, color.blue)
         }
     }
 
@@ -725,12 +1214,30 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         return mix(SIMD3<Float>(r, g, b), SIMD3<Float>(0.92, 0.92, 0.92), 0.25)
     }
 
+    private func vehicleAccelerationColor(acceleration: Float) -> SIMD3<Float> {
+        let clamped = max(-4, min(acceleration, 4))
+        if clamped < 0 {
+            return mix(SIMD3<Float>(0.92, 0.26, 0.22), SIMD3<Float>(0.82, 0.82, 0.82), (clamped + 4) / 4)
+        }
+        return mix(SIMD3<Float>(0.82, 0.82, 0.82), SIMD3<Float>(0.28, 0.78, 0.38), clamped / 4)
+    }
+
+    private func vehicleRouteColor(routeID: String?) -> SIMD3<Float> {
+        vehicleTypeColor(typeID: stableHash(routeID ?? "route"))
+    }
+
+    private func vehicleCO2Color(co2Emission: Float) -> SIMD3<Float> {
+        let t = max(0, min(co2Emission / 2_000, 1))
+        return mix(SIMD3<Float>(0.35, 0.78, 0.46), SIMD3<Float>(0.86, 0.30, 0.24), t)
+    }
+
     private func selectedVehicleColor() -> SIMD3<Float> {
         SIMD3<Float>(1.00, 0.96, 0.42)
     }
 
     private func nearestVehicleID(at screenLocation: CGPoint) -> String? {
         guard let transform = currentTransform() else { return nil }
+        guard RenderLOD.vehicleScreenSize(scale: transform.scale) != nil else { return nil }
         let maxPickDistance: CGFloat = 16
         var bestID: String?
         var bestDistance = maxPickDistance
@@ -761,7 +1268,17 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             guard points.count > 1 else { continue }
 
             let baseWidth = lane.width.isFinite && lane.width > 0 ? lane.width : 3.2
-            let renderedHalfWidth = min(max(CGFloat(baseWidth * transform.scale), 1), 18) * 0.5
+            let isSelected = edge.id == selectedEdgeID || selectedEdgeIDs.contains(edge.id)
+            let isSelectedRoute = !isSelected && selectedRouteEdgeIDs.contains(edge.id)
+            let isHoveredRoute = !isSelected && !isSelectedRoute && hoveredRouteEdgeIDs.contains(edge.id)
+            let width = laneSegmentWidth(
+                baseWidth: baseWidth,
+                isSelected: isSelected,
+                isSelectedRoute: isSelectedRoute,
+                isHoveredRoute: isHoveredRoute
+            )
+            guard RenderLOD.shouldRenderLane(worldWidth: width, scale: transform.scale) else { continue }
+            let renderedHalfWidth = min(max(CGFloat(width * transform.scale), 1), 18) * 0.5
             let pickThreshold = max(CGFloat(8), renderedHalfWidth + 4)
             var previous = transform.point(points[points.startIndex])
             var index = points.index(after: points.startIndex)
@@ -790,6 +1307,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         onEdgePicked?(nearestEdgeID(at: location))
     }
 
+    private func updateHoveredVehicle(_ vehicleID: String?) {
+        guard lastHoveredVehicleID != vehicleID else { return }
+        lastHoveredVehicleID = vehicleID
+        onVehicleHovered?(vehicleID)
+    }
+
     private func reportVisibleBounds(transform: ViewTransform) {
         let visible = transform.visibleWorldBounds(viewSize: bounds.size)
         if let lastReportedVisibleBounds, boundsAreClose(lastReportedVisibleBounds, visible) {
@@ -812,6 +1335,11 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             descriptor.vertexFunction = library.makeFunction(name: vertexFunction)
             descriptor.fragmentFunction = library.makeFunction(name: fragmentFunction)
             descriptor.colorAttachments[0].pixelFormat = colorPixelFormat
+            descriptor.colorAttachments[0].isBlendingEnabled = true
+            descriptor.colorAttachments[0].sourceRGBBlendFactor = .sourceAlpha
+            descriptor.colorAttachments[0].destinationRGBBlendFactor = .oneMinusSourceAlpha
+            descriptor.colorAttachments[0].sourceAlphaBlendFactor = .one
+            descriptor.colorAttachments[0].destinationAlphaBlendFactor = .oneMinusSourceAlpha
             return try device.makeRenderPipelineState(descriptor: descriptor)
         } catch {
             NSLog("Failed to create Metal pipeline \(vertexFunction)/\(fragmentFunction): \(error.localizedDescription)")
@@ -849,6 +1377,48 @@ private func mix(_ a: SIMD3<Float>, _ b: SIMD3<Float>, _ t: Float) -> SIMD3<Floa
     a + (b - a) * t
 }
 
+private func stableHash(_ value: String) -> UInt32 {
+    var hash: UInt32 = 2166136261
+    for byte in value.utf8 {
+        hash ^= UInt32(byte)
+        hash &*= 16777619
+    }
+    return hash
+}
+
+enum RenderLOD {
+    static let minimumLaneScreenWidth: Float = 0.5
+    static let minimumVehicleScreenSize: Float = 2
+    static let defaultVehicleLength: Float = 5
+    static let defaultVehicleWidth: Float = 2
+
+    static func shouldRenderLane(worldWidth: Float, scale: Float) -> Bool {
+        guard worldWidth.isFinite, scale.isFinite, worldWidth > 0, scale > 0 else {
+            return false
+        }
+        return worldWidth * scale >= minimumLaneScreenWidth
+    }
+
+    static func vehicleScreenSize(
+        scale: Float,
+        length: Float = defaultVehicleLength,
+        width: Float = defaultVehicleWidth
+    ) -> SIMD2<Float>? {
+        guard
+            scale.isFinite,
+            length.isFinite,
+            width.isFinite,
+            scale > 0,
+            length > 0,
+            width > 0
+        else {
+            return nil
+        }
+        let size = SIMD2(length * scale, width * scale)
+        return max(size.x, size.y) >= minimumVehicleScreenSize ? size : nil
+    }
+}
+
 private func screenDistance(from a: CGPoint, to b: CGPoint) -> CGFloat {
     let dx = a.x - b.x
     let dy = a.y - b.y
@@ -869,6 +1439,12 @@ private func screenDistance(from point: CGPoint, toSegmentStart start: CGPoint, 
     return screenDistance(from: point, to: closest)
 }
 
+private struct BackgroundRenderVertex {
+    var position: SIMD2<Float>
+    var texCoord: SIMD2<Float>
+    var tint: SIMD4<Float>
+}
+
 private struct JunctionRenderVertex {
     var position: SIMD2<Float>
     var color: SIMD4<Float>
@@ -882,6 +1458,7 @@ private struct LaneSegmentInstance {
 private struct VehicleInstance {
     var pose: SIMD4<Float>
     var color: SIMD4<Float>
+    var metrics: SIMD4<Float>
 }
 
 private struct VehicleRenderSample {
@@ -890,6 +1467,10 @@ private struct VehicleRenderSample {
     var angle: Float
     var speed: Float
     var typeID: UInt32
+    var acceleration: Float?
+    var co2Emission: Float?
+    var routeID: String?
+    var color: SumoColor?
 
     init(snapshot: VehicleSnapshot) {
         id = snapshot.id
@@ -897,6 +1478,10 @@ private struct VehicleRenderSample {
         angle = snapshot.angle
         speed = snapshot.speed
         typeID = snapshot.typeID
+        acceleration = snapshot.acceleration
+        co2Emission = snapshot.co2Emission
+        routeID = snapshot.routeID
+        color = snapshot.color
     }
 
     func interpolated(to target: VehicleRenderSample, progress: Float) -> VehicleRenderSample {
@@ -909,16 +1494,40 @@ private struct VehicleRenderSample {
             position: position + (target.position - position) * clamped,
             angle: angle + angleDelta * clamped,
             speed: speed + (target.speed - speed) * clamped,
-            typeID: target.typeID
+            typeID: target.typeID,
+            acceleration: interpolateOptional(acceleration, target.acceleration, progress: clamped),
+            co2Emission: interpolateOptional(co2Emission, target.co2Emission, progress: clamped),
+            routeID: target.routeID ?? routeID,
+            color: target.color ?? color
         )
     }
 
-    private init(id: String, position: SIMD2<Float>, angle: Float, speed: Float, typeID: UInt32) {
+    private init(
+        id: String,
+        position: SIMD2<Float>,
+        angle: Float,
+        speed: Float,
+        typeID: UInt32,
+        acceleration: Float?,
+        co2Emission: Float?,
+        routeID: String?,
+        color: SumoColor?
+    ) {
         self.id = id
         self.position = position
         self.angle = angle
         self.speed = speed
         self.typeID = typeID
+        self.acceleration = acceleration
+        self.co2Emission = co2Emission
+        self.routeID = routeID
+        self.color = color
+    }
+
+    private func interpolateOptional(_ source: Float?, _ target: Float?, progress: Float) -> Float? {
+        guard let target else { return source }
+        guard let source else { return target }
+        return source + (target - source) * progress
     }
 }
 
@@ -927,22 +1536,31 @@ private struct LaneViewportUniforms {
     var viewport: SIMD4<Float>
 
     init(transform: ViewTransform, viewSize: CGSize) {
-        camera = SIMD4(transform.center.x, transform.center.y, transform.scale, 0)
+        camera = SIMD4(transform.center.x, transform.center.y, transform.scale, transform.rotationRadians)
         viewport = SIMD4(Float(viewSize.width), Float(viewSize.height), 0, 0)
     }
 }
 
 private struct ViewTransform {
     let scale: Float
+    let rotationRadians: Float
     private let offsetX: Float
     private let offsetY: Float
     private let height: Float
     let center: SIMD2<Float>
 
-    init(netBounds: SIMD4<Float>, viewSize: CGSize, inset: Float, center: SIMD2<Float>?, pointsPerWorldUnit: Float?) {
+    init(
+        netBounds: SIMD4<Float>,
+        viewSize: CGSize,
+        inset: Float,
+        center: SIMD2<Float>?,
+        pointsPerWorldUnit: Float?,
+        rotationRadians: Float
+    ) {
         height = Float(viewSize.height)
         let fittedCenter = SIMD2((netBounds.x + netBounds.z) * 0.5, (netBounds.y + netBounds.w) * 0.5)
         self.center = center ?? fittedCenter
+        self.rotationRadians = rotationRadians.isFinite ? rotationRadians : 0
         if let pointsPerWorldUnit {
             scale = pointsPerWorldUnit
         } else {
@@ -957,19 +1575,22 @@ private struct ViewTransform {
     }
 
     func point(_ point: SIMD2<Float>) -> CGPoint {
-        let x = offsetX + (point.x - center.x) * scale
-        let y = height - (offsetY + (point.y - center.y) * scale)
+        let rotated = rotate(point - center)
+        let x = offsetX + rotated.x * scale
+        let y = height - (offsetY + rotated.y * scale)
         return CGPoint(x: CGFloat(x), y: CGFloat(y))
     }
 
     func worldPoint(forScreenPoint point: CGPoint) -> SIMD2<Float> {
-        let x = (Float(point.x) - offsetX) / scale + center.x
-        let y = ((height - Float(point.y)) - offsetY) / scale + center.y
-        return SIMD2(x, y)
+        let rotated = SIMD2(
+            (Float(point.x) - offsetX) / scale,
+            ((height - Float(point.y)) - offsetY) / scale
+        )
+        return center + inverseRotate(rotated)
     }
 
     func worldDelta(forScreenDelta delta: CGPoint) -> SIMD2<Float> {
-        SIMD2(-Float(delta.x) / scale, Float(delta.y) / scale)
+        inverseRotate(SIMD2(-Float(delta.x) / scale, Float(delta.y) / scale))
     }
 
     func visibleWorldBounds(viewSize: CGSize) -> SIMD4<Float> {
@@ -988,6 +1609,18 @@ private struct ViewTransform {
             ys.max() ?? 0
         )
     }
+
+    private func rotate(_ vector: SIMD2<Float>) -> SIMD2<Float> {
+        let c = cos(rotationRadians)
+        let s = sin(rotationRadians)
+        return SIMD2(vector.x * c - vector.y * s, vector.x * s + vector.y * c)
+    }
+
+    private func inverseRotate(_ vector: SIMD2<Float>) -> SIMD2<Float> {
+        let c = cos(rotationRadians)
+        let s = sin(rotationRadians)
+        return SIMD2(vector.x * c + vector.y * s, -vector.x * s + vector.y * c)
+    }
 }
 
 private let laneShaderSource = """
@@ -999,6 +1632,12 @@ struct JunctionRenderVertex {
     float4 color;
 };
 
+struct BackgroundRenderVertex {
+    packed_float2 position;
+    packed_float2 texCoord;
+    float4 tint;
+};
+
 struct LaneSegmentInstance {
     float4 points;
     float4 style;
@@ -1007,6 +1646,7 @@ struct LaneSegmentInstance {
 struct VehicleInstance {
     float4 pose;
     float4 color;
+    float4 metrics;
 };
 
 struct LaneViewportUniforms {
@@ -1019,6 +1659,61 @@ struct LaneVertexOut {
     float4 color;
 };
 
+struct BackgroundVertexOut {
+    float4 position [[position]];
+    float2 texCoord;
+    float4 tint;
+};
+
+float2 worldToScreen(float2 world, constant LaneViewportUniforms &uniforms) {
+    const float2 center = uniforms.camera.xy;
+    const float scale = uniforms.camera.z;
+    const float rotation = uniforms.camera.w;
+    const float c = cos(rotation);
+    const float s = sin(rotation);
+    const float2 delta = world - center;
+    const float2 rotated = float2(delta.x * c - delta.y * s, delta.x * s + delta.y * c);
+    const float2 size = uniforms.viewport.xy;
+    return float2(
+        size.x * 0.5 + rotated.x * scale,
+        size.y * 0.5 - rotated.y * scale
+    );
+}
+
+float4 screenToClip(float2 screen, float2 size) {
+    return float4(
+        (screen.x / size.x) * 2.0 - 1.0,
+        1.0 - (screen.y / size.y) * 2.0,
+        0.0,
+        1.0
+    );
+}
+
+vertex BackgroundVertexOut backgroundVertex(
+    uint vertexID [[vertex_id]],
+    const device BackgroundRenderVertex *vertices [[buffer(0)]],
+    constant LaneViewportUniforms &uniforms [[buffer(1)]]
+) {
+    const BackgroundRenderVertex vertex = vertices[vertexID];
+    const float2 world = float2(vertex.position);
+    const float2 size = uniforms.viewport.xy;
+    const float2 screen = worldToScreen(world, uniforms);
+
+    BackgroundVertexOut out;
+    out.position = screenToClip(screen, size);
+    out.texCoord = float2(vertex.texCoord);
+    out.tint = vertex.tint;
+    return out;
+}
+
+fragment float4 backgroundFragment(
+    BackgroundVertexOut in [[stage_in]],
+    texture2d<float> backgroundTexture [[texture(0)]]
+) {
+    constexpr sampler textureSampler(address::clamp_to_edge, filter::linear);
+    return backgroundTexture.sample(textureSampler, in.texCoord) * in.tint;
+}
+
 vertex LaneVertexOut junctionVertex(
     uint vertexID [[vertex_id]],
     const device JunctionRenderVertex *vertices [[buffer(0)]],
@@ -1026,21 +1721,11 @@ vertex LaneVertexOut junctionVertex(
 ) {
     const JunctionRenderVertex junction = vertices[vertexID];
     const float2 world = float2(junction.position);
-    const float2 center = uniforms.camera.xy;
-    const float scale = uniforms.camera.z;
     const float2 size = uniforms.viewport.xy;
-    const float2 screen = float2(
-        size.x * 0.5 + (world.x - center.x) * scale,
-        size.y * 0.5 - (world.y - center.y) * scale
-    );
+    const float2 screen = worldToScreen(world, uniforms);
 
     LaneVertexOut out;
-    out.position = float4(
-        (screen.x / size.x) * 2.0 - 1.0,
-        1.0 - (screen.y / size.y) * 2.0,
-        0.0,
-        1.0
-    );
+    out.position = screenToClip(screen, size);
     out.color = junction.color;
     return out;
 }
@@ -1056,19 +1741,12 @@ vertex LaneVertexOut laneVertex(
     constant LaneViewportUniforms &uniforms [[buffer(1)]]
 ) {
     const LaneSegmentInstance segment = segments[instanceID];
-    const float2 center = uniforms.camera.xy;
     const float scale = uniforms.camera.z;
     const float2 size = uniforms.viewport.xy;
     const float2 worldStart = segment.points.xy;
     const float2 worldEnd = segment.points.zw;
-    const float2 screenStart = float2(
-        size.x * 0.5 + (worldStart.x - center.x) * scale,
-        size.y * 0.5 - (worldStart.y - center.y) * scale
-    );
-    const float2 screenEnd = float2(
-        size.x * 0.5 + (worldEnd.x - center.x) * scale,
-        size.y * 0.5 - (worldEnd.y - center.y) * scale
-    );
+    const float2 screenStart = worldToScreen(worldStart, uniforms);
+    const float2 screenEnd = worldToScreen(worldEnd, uniforms);
     const float2 direction = screenEnd - screenStart;
     const float segmentLength = max(length(direction), 0.0001);
     const float2 normal = float2(-direction.y, direction.x) / segmentLength;
@@ -1097,12 +1775,7 @@ vertex LaneVertexOut laneVertex(
     }
 
     LaneVertexOut out;
-    out.position = float4(
-        (screen.x / size.x) * 2.0 - 1.0,
-        1.0 - (screen.y / size.y) * 2.0,
-        0.0,
-        1.0
-    );
+    out.position = screenToClip(screen, size);
     out.color = float4(segment.style.xyz, 1.0);
     return out;
 }
@@ -1123,20 +1796,14 @@ vertex VehicleVertexOut vehicleVertex(
     constant LaneViewportUniforms &uniforms [[buffer(1)]]
 ) {
     const VehicleInstance vehicle = vehicles[instanceID];
-    const float2 center = uniforms.camera.xy;
-    const float scale = uniforms.camera.z;
     const float2 size = uniforms.viewport.xy;
     const float2 world = vehicle.pose.xy;
-    const float angle = (90.0 - vehicle.pose.z) * 0.01745329252;
-    const float speed = vehicle.pose.w;
+    const float angle = (90.0 - vehicle.pose.z) * 0.01745329252 + uniforms.camera.w;
     const float2 forward = float2(cos(angle), sin(angle));
     const float2 right = float2(-forward.y, forward.x);
-    const float length = clamp(10.0 + speed * 0.18, 8.0, 18.0);
-    const float width = clamp(length * 0.48, 4.0, 8.0);
-    const float2 screenCenter = float2(
-        size.x * 0.5 + (world.x - center.x) * scale,
-        size.y * 0.5 - (world.y - center.y) * scale
-    );
+    const float length = clamp(vehicle.metrics.x, 2.0, 34.0);
+    const float width = clamp(vehicle.metrics.y, 1.0, 14.0);
+    const float2 screenCenter = worldToScreen(world, uniforms);
 
     float2 screen;
     switch (vertexID) {
@@ -1152,12 +1819,7 @@ vertex VehicleVertexOut vehicleVertex(
     }
 
     VehicleVertexOut out;
-    out.position = float4(
-        (screen.x / size.x) * 2.0 - 1.0,
-        1.0 - (screen.y / size.y) * 2.0,
-        0.0,
-        1.0
-    );
+    out.position = screenToClip(screen, size);
     out.color = vehicle.color;
     return out;
 }

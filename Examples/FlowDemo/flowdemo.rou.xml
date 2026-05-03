@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<routes>
+    <vType id="car" accel="2.6" decel="4.5" sigma="0.5" length="5.0" minGap="2.5" maxSpeed="13.89" color="0.2,0.6,1.0"/>
+    <vType id="bus" accel="1.2" decel="4.0" sigma="0.4" length="12.0" minGap="3.0" maxSpeed="11.11" color="1.0,0.7,0.2"/>
+
+    <route id="west_east" edges="west_to_center center_to_east"/>
+    <route id="east_west" edges="east_to_center center_to_west"/>
+    <route id="south_north" edges="south_to_center center_to_north"/>
+    <route id="north_south" edges="north_to_center center_to_south"/>
+    <route id="west_north" edges="west_to_center center_to_north"/>
+    <route id="south_east" edges="south_to_center center_to_east"/>
+
+    <flow id="we_car" type="car" route="west_east" begin="0" end="300" period="2.0" departLane="best" departSpeed="max"/>
+    <flow id="ew_car" type="car" route="east_west" begin="5" end="300" period="2.3" departLane="best" departSpeed="max"/>
+    <flow id="sn_car" type="car" route="south_north" begin="10" end="300" period="2.6" departLane="best" departSpeed="max"/>
+    <flow id="ns_car" type="car" route="north_south" begin="15" end="300" period="3.0" departLane="best" departSpeed="max"/>
+    <flow id="turning_car" type="car" route="west_north" begin="20" end="300" period="4.0" departLane="best" departSpeed="max"/>
+    <flow id="bus_flow" type="bus" route="south_east" begin="30" end="300" period="18.0" departLane="best" departSpeed="max"/>
+</routes>

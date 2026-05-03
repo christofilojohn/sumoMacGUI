@@ -56,12 +56,29 @@ final class TraCIIntegrationTests: XCTestCase {
 
         let conn = TraCIConnection(port: handle.port)
         try await conn.connect()
-        TraCIClient.traceWire = true
         let client = TraCIClient(connection: conn)
 
         let v = try await client.getVersion()
         XCTAssertGreaterThan(v.apiVersion, 0)
         XCTAssertTrue(v.identifier.contains("SUMO"), "expected SUMO identifier, got \(v.identifier)")
+
+        let edgeIDs = try await client.edgeIDs()
+        let laneIDs = try await client.laneIDs()
+        let junctionIDs = try await client.junctionIDs()
+        let routeIDs = try await client.routeIDs()
+
+        XCTAssertEqual(Set(edgeIDs).intersection(["e1", "e2"]).count, 2)
+        XCTAssertTrue(laneIDs.contains("e1_0"))
+        XCTAssertTrue(junctionIDs.contains("j1"))
+        XCTAssertEqual(routeIDs, ["r"])
+        let routeEdges = try await client.routeEdges("r")
+        let edgeCount = try await client.edgeCount()
+        let laneCount = try await client.laneCount()
+        let junctionCount = try await client.junctionCount()
+        XCTAssertEqual(routeEdges, ["e1", "e2"])
+        XCTAssertGreaterThanOrEqual(edgeCount, 2)
+        XCTAssertGreaterThanOrEqual(laneCount, 2)
+        XCTAssertGreaterThanOrEqual(junctionCount, 3)
 
         try await client.step(targetTime: 0)
         try await client.step(targetTime: 0)

@@ -19,6 +19,11 @@ let package = Package(
             path: "Sources/SumoGUIMac",
             exclude: ["Resources"]
         ),
+        .executableTarget(
+            name: "NetParseBenchmark",
+            dependencies: ["SumoKit"],
+            path: "Sources/NetParseBenchmark"
+        ),
         .testTarget(
             name: "SumoKitTests",
             dependencies: ["SumoKit"],

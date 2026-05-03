@@ -8,7 +8,7 @@ public enum NetParseError: Error {
 /// Streaming SAX parser for SUMO `.net.xml`. Produces a fully-populated `NetGraph`.
 /// Designed for >100MB files: only the running attribute set is held in memory at any moment.
 public final class NetXMLParser: NSObject, XMLParserDelegate {
-    private let graph = NetGraph()
+    private let graph: NetGraph
     private var error: Error?
 
     private var currentEdge: Edge?
@@ -16,7 +16,10 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
     private var currentJunction: Junction?
     private var currentTL: TrafficLightLogic?
 
-    public override init() { super.init() }
+    public override init() {
+        self.graph = NetGraph()
+        super.init()
+    }
 
     public static func parse(url: URL) throws -> NetGraph {
         guard let parser = XMLParser(contentsOf: url) else {
@@ -32,6 +35,26 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
             throw NetParseError.malformed(parser.parserError?.localizedDescription ?? "unknown")
         }
         return delegate.graph
+    }
+
+    public static func parseAdditional(url: URL, into graph: NetGraph) throws {
+        guard let parser = XMLParser(contentsOf: url) else {
+            throw NetParseError.ioError("could not open \(url.path)")
+        }
+        let delegate = NetXMLParser(graph: graph)
+        parser.delegate = delegate
+        parser.shouldProcessNamespaces = false
+        parser.shouldReportNamespacePrefixes = false
+        parser.shouldResolveExternalEntities = false
+        guard parser.parse() else {
+            if let e = delegate.error { throw e }
+            throw NetParseError.malformed(parser.parserError?.localizedDescription ?? "unknown")
+        }
+    }
+
+    private init(graph: NetGraph) {
+        self.graph = graph
+        super.init()
     }
 
     public func parser(_ parser: XMLParser, didStartElement elementName: String,
@@ -140,6 +163,32 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
                 nodes: parseSpaceList(attrs["nodes"]),
                 edges: parseSpaceList(attrs["edges"])
             ))
+        case "poly":
+            let shape = parsePolyline(attrs["shape"] ?? "")
+            let offset = Int32(graph.polygonShapePoints.count)
+            graph.polygonShapePoints.append(contentsOf: shape)
+            graph.polygons.append(PolygonShape(
+                id: attrs["id"] ?? "",
+                type: attrs["type"] ?? "",
+                color: parseColor(attrs["color"]) ?? SumoColor(red: 96, green: 130, blue: 166, alpha: 180),
+                fill: parseBool(attrs["fill"], defaultValue: true),
+                layer: Float(attrs["layer"] ?? "0") ?? 0,
+                shapeOffset: offset,
+                shapeCount: Int32(shape.count),
+                bounds: bounds(of: shape)
+            ))
+        case "poi":
+            guard let position = parsePOIPosition(attrs) else { return }
+            graph.pois.append(POI(
+                id: attrs["id"] ?? "",
+                type: attrs["type"] ?? "",
+                color: parseColor(attrs["color"]) ?? SumoColor(red: 247, green: 192, blue: 74, alpha: 255),
+                position: position,
+                layer: Float(attrs["layer"] ?? "0") ?? 0,
+                width: Float(attrs["width"] ?? "8") ?? 8,
+                height: Float(attrs["height"] ?? "8") ?? 8,
+                imageFile: attrs["imgFile"] ?? ""
+            ))
         default:
             break
         }
@@ -221,6 +270,43 @@ public final class NetXMLParser: NSObject, XMLParserDelegate {
     private func parseSpaceList(_ s: String?) -> [String] {
         guard let s, !s.isEmpty else { return [] }
         return s.split(separator: " ").map(String.init)
+    }
+
+    private func parsePOIPosition(_ attrs: [String: String]) -> SIMD2<Float>? {
+        guard
+            let xValue = attrs["x"] ?? attrs["lon"],
+            let yValue = attrs["y"] ?? attrs["lat"],
+            let x = Float(xValue),
+            let y = Float(yValue)
+        else {
+            return nil
+        }
+        return SIMD2(x, y)
+    }
+
+    private func parseColor(_ value: String?) -> SumoColor? {
+        guard let value else { return nil }
+        let parts = value.split(separator: ",")
+        guard parts.count == 3 || parts.count == 4 else { return nil }
+        let channels = parts.map { UInt8(clamping: Int($0.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) }
+        return SumoColor(
+            red: channels[0],
+            green: channels[1],
+            blue: channels[2],
+            alpha: channels.count == 4 ? channels[3] : 255
+        )
+    }
+
+    private func parseBool(_ value: String?, defaultValue: Bool) -> Bool {
+        guard let value else { return defaultValue }
+        switch value.lowercased() {
+        case "true", "1", "yes":
+            return true
+        case "false", "0", "no":
+            return false
+        default:
+            return defaultValue
+        }
     }
 
     private func bounds(of pts: [SIMD2<Float>]) -> SIMD4<Float> {

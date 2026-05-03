@@ -81,6 +81,29 @@ final class ViewportStateTests: XCTestCase {
         XCTAssertEqual(viewport.pointsPerWorldUnit, scale, accuracy: 0.001)
     }
 
+    func testRotationCanBeSetAndReset() {
+        let viewport = makeFitted()
+        var changeCount = 0
+        viewport.onChange = { changeCount += 1 }
+
+        viewport.setRotationDegrees(90)
+        XCTAssertEqual(viewport.rotationRadians, Float.pi / 2, accuracy: 0.001)
+
+        viewport.resetRotation()
+        XCTAssertEqual(viewport.rotationRadians, 0, accuracy: 0.001)
+        XCTAssertEqual(changeCount, 2)
+    }
+
+    func testRequestFitClearsRotation() {
+        let viewport = makeFitted()
+        viewport.setRotationDegrees(45)
+
+        viewport.requestFit()
+
+        XCTAssertFalse(viewport.isConfigured)
+        XCTAssertEqual(viewport.rotationRadians, 0, accuracy: 0.001)
+    }
+
     func testZoomFactorClampedToReasonableRange() {
         let viewport = makeFitted()
         let before = viewport.pointsPerWorldUnit

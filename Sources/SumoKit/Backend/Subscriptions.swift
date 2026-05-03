@@ -11,6 +11,25 @@ public struct ContextSubscriptionResult: Sendable {
 }
 
 extension TraCIReader {
+    public mutating func readSubscriptionResponses() throws -> [(UInt8, SubscriptionResult)] {
+        guard !isAtEnd else { return [] }
+        let count = Int(try readI32())
+        var out: [(UInt8, SubscriptionResult)] = []
+        out.reserveCapacity(count)
+        for _ in 0..<count {
+            _ = try readCommandLengthHeader()
+            let cmd = try readU8()
+            let objectID = try readString()
+            if isContextSubscriptionResponse(cmd) {
+                out.append(contentsOf: try readContextSubscriptionBody(responseCommand: cmd, objectID: objectID))
+            } else {
+                let result = try readVariableSubscriptionBody(responseCommand: cmd, objectID: objectID)
+                out.append(result)
+            }
+        }
+        return out
+    }
+
     /// Reads a length prefix that may be 1-byte short or 0+I32 extended.
     /// Returns the *content* length following the prefix.
     public mutating func readCommandLengthHeader() throws -> Int {
@@ -61,5 +80,58 @@ extension TraCIReader {
             }
             return (cmd, SubscriptionResult(objectID: objectID, values: values))
         }
+    }
+
+    private mutating func readVariableSubscriptionBody(
+        responseCommand: UInt8,
+        objectID: String
+    ) throws -> (UInt8, SubscriptionResult) {
+        let n = Int(try readU8())
+        var values: [UInt8: TraCIValue] = [:]
+        values.reserveCapacity(n)
+        for _ in 0..<n {
+            let variable = try readU8()
+            let status = try readU8()
+            if status != 0 {
+                _ = try readTyped()
+                continue
+            }
+            values[variable] = try readTyped()
+        }
+        return (responseCommand, SubscriptionResult(objectID: objectID, values: values))
+    }
+
+    private mutating func readContextSubscriptionBody(
+        responseCommand: UInt8,
+        objectID: String
+    ) throws -> [(UInt8, SubscriptionResult)] {
+        _ = try readU8()
+        let variableCount = Int(try readU8())
+        let objectCount = Int(try readI32())
+        var out: [(UInt8, SubscriptionResult)] = []
+        out.reserveCapacity(objectCount)
+        for _ in 0..<objectCount {
+            let contextObjectID = try readString()
+            var values: [UInt8: TraCIValue] = [:]
+            values.reserveCapacity(variableCount)
+            for _ in 0..<variableCount {
+                let variable = try readU8()
+                let status = try readU8()
+                if status != 0 {
+                    _ = try readTyped()
+                    continue
+                }
+                values[variable] = try readTyped()
+            }
+            out.append((
+                responseCommand,
+                SubscriptionResult(objectID: "\(objectID)::\(contextObjectID)", values: values)
+            ))
+        }
+        return out
+    }
+
+    private func isContextSubscriptionResponse(_ command: UInt8) -> Bool {
+        command >= 0x90 && command < 0xA0
     }
 }

@@ -20,4 +20,6 @@
 
     <connection from="a" to="b" fromLane="0" toLane="0" tl="j1" linkIndex="0" dir="s" state="O"/>
     <roundabout nodes="j0 j1 j2" edges="a b"/>
+    <poly id="zone0" type="park" color="60,140,95,180" fill="true" layer="-1" shape="20.00,-10.00 40.00,-10.00 40.00,10.00 20.00,10.00"/>
+    <poi id="poi0" type="stop" color="250,190,40,255" x="50.00" y="5.00" layer="2" width="6" height="8"/>
 </net>

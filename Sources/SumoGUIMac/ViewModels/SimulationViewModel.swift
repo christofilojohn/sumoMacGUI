@@ -30,6 +30,105 @@ final class SimulationViewModel: ObservableObject {
         let url: URL
     }
 
+    struct RecentDocument: Equatable, Identifiable {
+        let url: URL
+
+        var id: String {
+            url.standardizedFileURL.path
+        }
+
+        var title: String {
+            url.lastPathComponent
+        }
+
+        var location: String {
+            url.deletingLastPathComponent().path
+        }
+    }
+
+    struct SimulationBreakpoint: Equatable, Identifiable {
+        let id: UUID
+        let time: Double
+
+        init(id: UUID = UUID(), time: Double) {
+            self.id = id
+            self.time = time
+        }
+    }
+
+    struct TrackerSample: Equatable, Identifiable {
+        let simTime: Double
+        let vehicleCount: Int
+        let speedFactor: Double
+
+        var id: Double { simTime }
+    }
+
+    enum TrackerVariable: String, CaseIterable, Identifiable {
+        case vehicleCount
+        case playbackSpeed
+        case selectedVehicleSpeed
+        case selectedVehicleAcceleration
+        case selectedVehicleCO2
+        case selectedEdgeOccupancy
+
+        var id: Self { self }
+
+        var title: String {
+            switch self {
+            case .vehicleCount:
+                return "Vehicle Count"
+            case .playbackSpeed:
+                return "Playback Speed"
+            case .selectedVehicleSpeed:
+                return "Vehicle Speed"
+            case .selectedVehicleAcceleration:
+                return "Vehicle Acceleration"
+            case .selectedVehicleCO2:
+                return "Vehicle CO2"
+            case .selectedEdgeOccupancy:
+                return "Lane Occupancy"
+            }
+        }
+
+        var axisTitle: String {
+            switch self {
+            case .vehicleCount:
+                return "Vehicles"
+            case .playbackSpeed:
+                return "Speed factor"
+            case .selectedVehicleSpeed:
+                return "m/s"
+            case .selectedVehicleAcceleration:
+                return "m/s2"
+            case .selectedVehicleCO2:
+                return "mg/s"
+            case .selectedEdgeOccupancy:
+                return "%"
+            }
+        }
+    }
+
+    struct TrackerValueSample: Equatable, Identifiable {
+        let simTime: Double
+        let variable: TrackerVariable
+        let objectID: String?
+        let value: Double
+
+        var id: String {
+            "\(variable.rawValue):\(objectID ?? "global"):\(String(format: "%.4f", simTime))"
+        }
+
+        var seriesName: String {
+            objectID.map { "\(variable.title) \($0)" } ?? variable.title
+        }
+    }
+
+    struct FollowedVehiclePose: Equatable {
+        let position: SIMD2<Float>
+        let angle: Float
+    }
+
     @Published private(set) var graph: NetGraph?
     @Published private(set) var sourceURL: URL?
     @Published private(set) var loadState: LoadState = .empty
@@ -37,26 +136,59 @@ final class SimulationViewModel: ObservableObject {
     @Published private(set) var runtimeMessage: String?
     @Published private(set) var playbackSpeedFactor: Double = 0
     @Published private(set) var screenshotExportRequest: ScreenshotExportRequest?
+    @Published private(set) var recentDocuments: [RecentDocument] = []
+    @Published private(set) var breakpoints: [SimulationBreakpoint] = []
+    @Published private(set) var trackerSamples: [TrackerSample] = []
+    @Published private(set) var trackerValueSamples: [TrackerValueSample] = []
     @Published private(set) var selectedVehicleID: String?
+    @Published private(set) var selectedEdgeIDs: Set<String> = []
+    @Published private(set) var selectedVehicleIDs: Set<String> = []
+    @Published private(set) var selectedRouteEdgeIDs: Set<String> = []
+    @Published private(set) var hoveredVehicleID: String?
+    @Published private(set) var hoveredVehicleRouteEdgeIDs: Set<String> = []
+    @Published private(set) var laneOccupancyByID: [String: Float] = [:]
     @Published var selectedEdgeID: String?
+    @Published var trackerVariable: TrackerVariable = .vehicleCount
     @Published var isPlaying = false
     @Published var isFollowingSelectedVehicle = false
+    @Published var isRotatingWithSelectedVehicle = false
     @Published var stepDelay: Double = 0.1
     @Published var laneColorMode: LaneColorMode = .speedLimit
     @Published var vehicleColorMode: VehicleColorMode = .speed
+    @Published var junctionColorMode: JunctionColorMode = .type
+    @Published var showPolygons = true
+    @Published var showPOIs = true
+    @Published var showBackground = true
+    @Published var showLegend = true
+    @Published var backgroundImageURL: URL?
+    @Published var backgroundWorldRect = SIMD4<Float>(0, 0, 1, 1)
+    @Published var backgroundOpacity: Float = 0.65
+    @Published var visualizationPalette = VisualizationPalette()
+    @Published var isVisualizationSettingsPresented = false
 
     private let initialOpenURL: URL?
+    private let userDefaults: UserDefaults
     private var didAttemptInitialLoad = false
     private var session: RunningSUMOSession?
     private var playTask: Task<Void, Never>?
     private var viewportSubscriptionTask: Task<Void, Never>?
+    private var hoverRouteTask: Task<Void, Never>?
     private var latestViewportBounds: SIMD4<Float>?
     private var spatialIndexes: SpatialIndexes?
     private var lastPlaybackWallTime: TimeInterval?
     private var lastPlaybackSimTime: Double?
+    private var vehicleRouteCache: [String: Set<String>] = [:]
+    private var vehicleRouteOrderCache: [String: [String]] = [:]
 
-    init(initialOpenURL: URL? = nil) {
+    private static let recentDocumentsKey = "SumoGUIMac.recentDocuments"
+    private static let maxRecentDocumentCount = 8
+    private static let maxTrackerSampleCount = 240
+    private static let maxTrackerValueSampleCount = 2_000
+
+    init(initialOpenURL: URL? = nil, userDefaults: UserDefaults = .standard) {
         self.initialOpenURL = initialOpenURL
+        self.userDefaults = userDefaults
+        recentDocuments = Self.loadRecentDocuments(from: userDefaults)
     }
 
     deinit {
@@ -88,16 +220,92 @@ final class SimulationViewModel: ObservableObject {
         selectedVehicleID != nil
     }
 
+    var hasSelection: Bool {
+        selectedEdgeID != nil ||
+            selectedVehicleID != nil ||
+            selectedEdgeIDs.isEmpty == false ||
+            selectedVehicleIDs.isEmpty == false ||
+            selectedRouteEdgeIDs.isEmpty == false
+    }
+
     var followedVehiclePosition: SIMD2<Float>? {
+        followedVehiclePose?.position
+    }
+
+    var followedVehiclePose: FollowedVehiclePose? {
         guard isFollowingSelectedVehicle, let selectedVehicleID else { return nil }
         if let vehicle = liveState.vehicles.first(where: { $0.id == selectedVehicleID }) {
-            return vehicle.position
+            return FollowedVehiclePose(position: vehicle.position, angle: vehicle.angle)
         }
-        return liveState.selectedVehicle?.position
+        guard let details = liveState.selectedVehicle, details.id == selectedVehicleID else {
+            return nil
+        }
+        guard let position = details.position else { return nil }
+        return FollowedVehiclePose(
+            position: position,
+            angle: details.angle ?? 0
+        )
+    }
+
+    var selectedVehicleRouteEdgeIDs: Set<String> {
+        var routeEdges = selectedRouteEdgeIDs
+        if let selectedVehicleID, let cached = vehicleRouteCache[selectedVehicleID] {
+            routeEdges.formUnion(cached)
+        }
+        guard
+            let selectedVehicleID,
+            liveState.selectedVehicle?.id == selectedVehicleID
+        else {
+            return routeEdges
+        }
+        routeEdges.formUnion(liveState.selectedVehicle?.routeEdgeIDs ?? [])
+        return routeEdges
+    }
+
+    var previewRouteEdgeIDs: Set<String> {
+        hoveredVehicleRouteEdgeIDs.subtracting(selectedVehicleRouteEdgeIDs)
+    }
+
+    var selectedTrackerSamples: [TrackerValueSample] {
+        trackerValueSamples.filter { $0.variable == trackerVariable }
+    }
+
+    var activeBackgroundDecal: BackgroundDecal? {
+        guard showBackground, let backgroundImageURL else { return nil }
+        return BackgroundDecal(url: backgroundImageURL, worldRect: backgroundWorldRect, opacity: backgroundOpacity)
+    }
+
+    var junctionLoadByID: [String: Int] {
+        guard let graph, liveState.vehicles.isEmpty == false else { return [:] }
+        var loads: [String: Int] = [:]
+        for vehicle in liveState.vehicles {
+            guard let nearest = nearestJunction(to: vehicle.position, in: graph), nearest.distanceSquared < 625 else {
+                continue
+            }
+            loads[nearest.id, default: 0] += 1
+        }
+        return loads
     }
 
     var isExternalTraCIAttached: Bool {
         session?.isAttachedToExternalSUMO == true
+    }
+
+    var visibleWorldBoundsSummary: String {
+        guard let latestViewportBounds else { return "Waiting for viewport" }
+        return String(
+            format: "%.0f, %.0f - %.0f, %.0f",
+            latestViewportBounds.x,
+            latestViewportBounds.y,
+            latestViewportBounds.z,
+            latestViewportBounds.w
+        )
+    }
+
+    var viewportSubscriptionSummary: String {
+        guard canRunSimulation else { return "No active SUMO session" }
+        guard latestViewportBounds != nil else { return "Waiting for visible bounds" }
+        return "Viewport vehicle context active"
     }
 
     var internalEdges: Int {
@@ -116,7 +324,22 @@ final class SimulationViewModel: ObservableObject {
     }
 
     var selectedEdgeLanes: [Lane] {
-        guard let graph, let edge = selectedEdge else { return [] }
+        guard let edge = selectedEdge else { return [] }
+        return lanes(for: edge)
+    }
+
+    func lanes(forEdgeID edgeID: String) -> [Lane] {
+        guard
+            let graph,
+            let index = graph.edgeIndex[edgeID]
+        else {
+            return []
+        }
+        return lanes(for: graph.edges[Int(index)])
+    }
+
+    private func lanes(for edge: Edge) -> [Lane] {
+        guard let graph else { return [] }
         return edge.laneRange.compactMap { laneIndex in
             let index = Int(laneIndex)
             guard graph.lanes.indices.contains(index) else { return nil }
@@ -164,6 +387,17 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    func openRecentDocument(_ document: RecentDocument) {
+        Task { @MainActor in
+            await load(url: document.url)
+        }
+    }
+
+    func clearRecentDocuments() {
+        recentDocuments = []
+        persistRecentDocuments()
+    }
+
     func presentAttachPanel() {
         let panel = NSOpenPanel()
         panel.message = "Choose the .sumocfg or .net.xml that matches the external SUMO run."
@@ -201,6 +435,142 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    func presentVisualizationSettings() {
+        isVisualizationSettingsPresented = true
+    }
+
+    func presentBackgroundImagePanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Choose Background Decal"
+        panel.prompt = "Choose"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [
+            UTType.png,
+            UTType.jpeg,
+            UTType.tiff,
+            UTType(filenameExtension: "tif"),
+            UTType(filenameExtension: "geotiff"),
+        ].compactMap { $0 }
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.setBackgroundImage(url)
+            }
+        }
+    }
+
+    func setBackgroundImage(_ url: URL) {
+        backgroundImageURL = url.standardizedFileURL
+        backgroundWorldRect = inferredBackgroundWorldRect(for: url)
+        showBackground = true
+        runtimeMessage = "Loaded background decal \(url.lastPathComponent)"
+    }
+
+    func clearBackgroundImage() {
+        backgroundImageURL = nil
+        runtimeMessage = "Cleared background decal"
+    }
+
+    func setBackgroundWorldRectComponent(_ index: Int, value: Float) {
+        guard value.isFinite else { return }
+        switch index {
+        case 0:
+            backgroundWorldRect.x = value
+        case 1:
+            backgroundWorldRect.y = value
+        case 2:
+            backgroundWorldRect.z = value
+        case 3:
+            backgroundWorldRect.w = value
+        default:
+            break
+        }
+    }
+
+    func presentImportVisualizationSettingsPanel() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Visualization Settings"
+        panel.prompt = "Import"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [UTType.xml]
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.importVisualizationSettings(from: url)
+            }
+        }
+    }
+
+    func presentExportVisualizationSettingsPanel() {
+        let panel = NSSavePanel()
+        panel.title = "Export Visualization Settings"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [UTType.xml]
+        panel.nameFieldStringValue = "sumogui-viewsettings.xml"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.exportVisualizationSettings(to: url)
+            }
+        }
+    }
+
+    func importVisualizationSettings(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            var snapshot = try VisualizationSettingsSnapshot.parse(data: data)
+            if let path = snapshot.backgroundPath, URL(fileURLWithPath: path).isFileURL {
+                let backgroundURL = URL(fileURLWithPath: path, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+                snapshot.backgroundPath = backgroundURL.path
+            }
+            applyVisualizationSettings(snapshot)
+            runtimeMessage = "Imported visualization settings from \(url.lastPathComponent)"
+        } catch {
+            runtimeMessage = "Visualization settings import failed: \(error.localizedDescription)"
+        }
+    }
+
+    func exportVisualizationSettings(to url: URL) {
+        do {
+            try currentVisualizationSettings().xmlData().write(to: url, options: .atomic)
+            runtimeMessage = "Exported visualization settings to \(url.lastPathComponent)"
+        } catch {
+            runtimeMessage = "Visualization settings export failed: \(error.localizedDescription)"
+        }
+    }
+
+    func currentVisualizationSettings() -> VisualizationSettingsSnapshot {
+        VisualizationSettingsSnapshot(
+            laneColorMode: laneColorMode,
+            vehicleColorMode: vehicleColorMode,
+            junctionColorMode: junctionColorMode,
+            showPolygons: showPolygons,
+            showPOIs: showPOIs,
+            showBackground: showBackground,
+            showLegend: showLegend,
+            backgroundPath: backgroundImageURL?.path,
+            backgroundWorldRect: backgroundWorldRect,
+            backgroundOpacity: backgroundOpacity,
+            palette: visualizationPalette
+        )
+    }
+
+    func applyVisualizationSettings(_ snapshot: VisualizationSettingsSnapshot) {
+        laneColorMode = snapshot.laneColorMode
+        vehicleColorMode = snapshot.vehicleColorMode
+        junctionColorMode = snapshot.junctionColorMode
+        showPolygons = snapshot.showPolygons
+        showPOIs = snapshot.showPOIs
+        showBackground = snapshot.showBackground
+        showLegend = snapshot.showLegend
+        backgroundImageURL = snapshot.backgroundPath.map { URL(fileURLWithPath: $0).standardizedFileURL }
+        backgroundWorldRect = snapshot.backgroundWorldRect
+        backgroundOpacity = snapshot.backgroundOpacity
+        visualizationPalette = snapshot.palette
+    }
+
     func requestScreenshotExport(to url: URL) {
         screenshotExportRequest = ScreenshotExportRequest(id: UUID(), url: url)
         runtimeMessage = "Exporting screenshot..."
@@ -231,21 +601,37 @@ final class SimulationViewModel: ObservableObject {
         loadState = .loading(url.lastPathComponent)
         liveState = SimulationState()
         runtimeMessage = nil
+        breakpoints = []
+        trackerSamples = []
+        trackerValueSamples = []
         resetPlaybackSpeed()
         selectedVehicleID = nil
+        selectedEdgeIDs = []
+        selectedVehicleIDs = []
+        selectedRouteEdgeIDs = []
+        clearHoverRoutePreview()
+        vehicleRouteCache = [:]
+        vehicleRouteOrderCache = [:]
+        laneOccupancyByID = [:]
         selectedEdgeID = nil
         isFollowingSelectedVehicle = false
+        isRotatingWithSelectedVehicle = false
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
             let resolved = try resolveInputURL(url)
             let parsed = try await Task.detached(priority: .userInitiated) {
-                try NetXMLParser.parse(url: resolved.netURL)
+                let graph = try NetXMLParser.parse(url: resolved.netURL)
+                for additionalURL in resolved.additionalURLs {
+                    try NetXMLParser.parseAdditional(url: additionalURL, into: graph)
+                }
+                return graph
             }.value
             graph = parsed
             spatialIndexes = parsed.makeSpatialIndexes()
             sourceURL = url
             loadState = .ready
+            rememberRecentDocument(url)
             if let configURL = resolved.configURL {
                 do {
                     let running = try await RunningSUMOSession.start(
@@ -256,7 +642,7 @@ final class SimulationViewModel: ObservableObject {
                     if let latestViewportBounds {
                         updateVisibleWorldBounds(latestViewportBounds)
                     }
-                    runtimeMessage = "Connected to \(running.versionIdentifier)"
+                    runtimeMessage = connectionMessage(prefix: "Connected", session: running)
                 } catch {
                     runtimeMessage = "Network loaded. SUMO launch failed: \(error.localizedDescription)"
                 }
@@ -273,21 +659,37 @@ final class SimulationViewModel: ObservableObject {
         loadState = .loading("Attaching to \(host):\(port)")
         liveState = SimulationState()
         runtimeMessage = nil
+        breakpoints = []
+        trackerSamples = []
+        trackerValueSamples = []
         resetPlaybackSpeed()
         selectedVehicleID = nil
+        selectedEdgeIDs = []
+        selectedVehicleIDs = []
+        selectedRouteEdgeIDs = []
+        clearHoverRoutePreview()
+        vehicleRouteCache = [:]
+        vehicleRouteOrderCache = [:]
+        laneOccupancyByID = [:]
         selectedEdgeID = nil
         isFollowingSelectedVehicle = false
+        isRotatingWithSelectedVehicle = false
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
             let resolved = try resolveInputURL(url)
             let parsed = try await Task.detached(priority: .userInitiated) {
-                try NetXMLParser.parse(url: resolved.netURL)
+                let graph = try NetXMLParser.parse(url: resolved.netURL)
+                for additionalURL in resolved.additionalURLs {
+                    try NetXMLParser.parseAdditional(url: additionalURL, into: graph)
+                }
+                return graph
             }.value
             graph = parsed
             spatialIndexes = parsed.makeSpatialIndexes()
             sourceURL = url
             loadState = .ready
+            rememberRecentDocument(url)
 
             do {
                 let running = try await RunningSUMOSession.attach(
@@ -300,7 +702,7 @@ final class SimulationViewModel: ObservableObject {
                 if let latestViewportBounds {
                     updateVisibleWorldBounds(latestViewportBounds)
                 }
-                runtimeMessage = "Attached to \(running.versionIdentifier) at \(host):\(port)"
+                runtimeMessage = connectionMessage(prefix: "Attached", session: running, suffix: " at \(host):\(port)")
                 isPlaying = true
                 resetPlaybackSpeed()
                 startPlayback()
@@ -389,17 +791,238 @@ final class SimulationViewModel: ObservableObject {
         lastPlaybackSimTime = nil
     }
 
+    @discardableResult
+    func addBreakpoint(at time: Double) -> Bool {
+        guard time.isFinite, time >= 0 else {
+            runtimeMessage = "Breakpoint time must be a non-negative number."
+            return false
+        }
+        guard breakpoints.contains(where: { abs($0.time - time) < 0.001 }) == false else {
+            runtimeMessage = String(format: "Breakpoint at %.2fs already exists.", time)
+            return false
+        }
+
+        breakpoints.append(SimulationBreakpoint(time: time))
+        breakpoints.sort { $0.time < $1.time }
+        runtimeMessage = String(format: "Added breakpoint at %.2fs.", time)
+        return true
+    }
+
+    func removeBreakpoint(id: SimulationBreakpoint.ID) {
+        breakpoints.removeAll { $0.id == id }
+    }
+
+    func clearBreakpoints() {
+        breakpoints = []
+    }
+
+    func reachedBreakpoint(from previousTime: Double, to currentTime: Double) -> SimulationBreakpoint? {
+        guard currentTime >= previousTime else { return nil }
+        let epsilon = 0.000_1
+        return breakpoints.first { breakpoint in
+            breakpoint.time > previousTime + epsilon && breakpoint.time <= currentTime + epsilon
+        }
+    }
+
+    func jumpToBreakpoint(_ breakpoint: SimulationBreakpoint) {
+        jumpToBreakpoint(at: breakpoint.time)
+    }
+
+    func jumpToBreakpoint(at time: Double) {
+        guard time.isFinite, time >= 0 else {
+            runtimeMessage = "Breakpoint time must be a non-negative number."
+            return
+        }
+        guard canRunSimulation else {
+            runtimeMessage = "Open a runnable SUMO configuration before jumping to a breakpoint."
+            return
+        }
+        guard liveState.simTime <= time + 0.000_1 else {
+            runtimeMessage = String(
+                format: "Cannot jump back from t = %.2fs to %.2fs.",
+                liveState.simTime,
+                time
+            )
+            return
+        }
+        if breakpoints.contains(where: { abs($0.time - time) < 0.001 }) == false {
+            _ = addBreakpoint(at: time)
+        }
+        isPlaying = true
+        resetPlaybackSpeed()
+        startPlayback()
+        runtimeMessage = String(format: "Running to breakpoint %.2fs.", time)
+    }
+
+    func recordTrackerSample(simTime: Double, vehicleCount: Int, speedFactor: Double) {
+        guard simTime.isFinite, speedFactor.isFinite else { return }
+        if let last = trackerSamples.last, abs(last.simTime - simTime) < 0.000_1 {
+            trackerSamples[trackerSamples.count - 1] = TrackerSample(
+                simTime: simTime,
+                vehicleCount: vehicleCount,
+                speedFactor: speedFactor
+            )
+        } else {
+            trackerSamples.append(TrackerSample(
+                simTime: simTime,
+                vehicleCount: vehicleCount,
+                speedFactor: speedFactor
+            ))
+        }
+        if trackerSamples.count > Self.maxTrackerSampleCount {
+            trackerSamples.removeFirst(trackerSamples.count - Self.maxTrackerSampleCount)
+        }
+        recordTrackerValueSample(
+            simTime: simTime,
+            variable: .vehicleCount,
+            objectID: nil,
+            value: Double(vehicleCount)
+        )
+        recordTrackerValueSample(
+            simTime: simTime,
+            variable: .playbackSpeed,
+            objectID: nil,
+            value: speedFactor
+        )
+    }
+
+    func recordTrackerValueSample(
+        simTime: Double,
+        variable: TrackerVariable,
+        objectID: String?,
+        value: Double
+    ) {
+        guard simTime.isFinite, value.isFinite else { return }
+        if let lastIndex = trackerValueSamples.lastIndex(where: {
+            $0.variable == variable &&
+                $0.objectID == objectID &&
+                abs($0.simTime - simTime) < 0.000_1
+        }) {
+            trackerValueSamples[lastIndex] = TrackerValueSample(
+                simTime: simTime,
+                variable: variable,
+                objectID: objectID,
+                value: value
+            )
+        } else {
+            trackerValueSamples.append(TrackerValueSample(
+                simTime: simTime,
+                variable: variable,
+                objectID: objectID,
+                value: value
+            ))
+        }
+        if trackerValueSamples.count > Self.maxTrackerValueSampleCount {
+            trackerValueSamples.removeFirst(trackerValueSamples.count - Self.maxTrackerValueSampleCount)
+        }
+    }
+
+    func recordSelectedObjectTrackerSamples(simTime: Double, state: SimulationState) {
+        let vehicleIDs = selectedVehicleIDs.union(selectedVehicleID.map { [$0] } ?? [])
+        for vehicleID in vehicleIDs.sorted() {
+            let snapshot = state.vehicles.first { $0.id == vehicleID }
+            let details = state.selectedVehicle?.id == vehicleID ? state.selectedVehicle : nil
+            if let speed = snapshot?.speed ?? details?.speed {
+                recordTrackerValueSample(
+                    simTime: simTime,
+                    variable: .selectedVehicleSpeed,
+                    objectID: vehicleID,
+                    value: Double(speed)
+                )
+            }
+            if let acceleration = snapshot?.acceleration ?? details?.acceleration {
+                recordTrackerValueSample(
+                    simTime: simTime,
+                    variable: .selectedVehicleAcceleration,
+                    objectID: vehicleID,
+                    value: Double(acceleration)
+                )
+            }
+            if let co2Emission = snapshot?.co2Emission {
+                recordTrackerValueSample(
+                    simTime: simTime,
+                    variable: .selectedVehicleCO2,
+                    objectID: vehicleID,
+                    value: Double(co2Emission)
+                )
+            }
+        }
+
+        for edgeID in selectedEdgeIDs.sorted() {
+            let occupancies = lanes(forEdgeID: edgeID).compactMap { laneOccupancyByID[$0.id] }
+            guard occupancies.isEmpty == false else { continue }
+            let average = occupancies.reduce(Float(0), +) / Float(occupancies.count)
+            recordTrackerValueSample(
+                simTime: simTime,
+                variable: .selectedEdgeOccupancy,
+                objectID: edgeID,
+                value: Double(average)
+            )
+        }
+    }
+
+    func hoverVehicle(_ id: String?) {
+        guard hoveredVehicleID != id else { return }
+
+        hoverRouteTask?.cancel()
+        hoverRouteTask = nil
+        hoveredVehicleID = id
+
+        guard let id else {
+            hoveredVehicleRouteEdgeIDs = []
+            return
+        }
+
+        if id == selectedVehicleID {
+            hoveredVehicleRouteEdgeIDs = selectedVehicleRouteEdgeIDs
+            return
+        }
+
+        if let cached = vehicleRouteCache[id] {
+            hoveredVehicleRouteEdgeIDs = cached
+            return
+        }
+
+        hoveredVehicleRouteEdgeIDs = []
+        hoverRouteTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: 90_000_000)
+            guard
+                !Task.isCancelled,
+                let self,
+                self.hoveredVehicleID == id,
+                let session = self.session
+            else {
+                return
+            }
+
+            let route = (try? await session.routeEdges(forVehicle: id)) ?? []
+            guard !Task.isCancelled, self.hoveredVehicleID == id else { return }
+            let routeSet = Set(route)
+            self.vehicleRouteCache[id] = routeSet
+            self.vehicleRouteOrderCache[id] = route
+            self.hoveredVehicleRouteEdgeIDs = routeSet
+        }
+    }
+
     private func stepSimulation(updatePlaybackSpeed: Bool = true) async {
         guard let session else { return }
         do {
+            let previousTime = liveState.simTime
             let nextState = try await session.step()
             liveState = nextState
+            await updateLaneOccupanciesIfNeeded(session: session)
             if updatePlaybackSpeed {
                 recordPlaybackStep(
                     simTime: nextState.simTime,
                     wallTime: Date.timeIntervalSinceReferenceDate
                 )
             }
+            recordTrackerSample(
+                simTime: nextState.simTime,
+                vehicleCount: nextState.vehicles.count,
+                speedFactor: playbackSpeedFactor
+            )
+            recordSelectedObjectTrackerSamples(simTime: nextState.simTime, state: nextState)
             if playbackSpeedFactor > 0 {
                 runtimeMessage = String(
                     format: "t = %.2fs, %d vehicles, %.1fx",
@@ -410,12 +1033,38 @@ final class SimulationViewModel: ObservableObject {
             } else {
                 runtimeMessage = String(format: "t = %.2fs, %d vehicles", liveState.simTime, liveState.vehicles.count)
             }
+            if let breakpoint = reachedBreakpoint(from: previousTime, to: nextState.simTime) {
+                runtimeMessage = String(
+                    format: "Paused at breakpoint %.2fs (t = %.2fs).",
+                    breakpoint.time,
+                    nextState.simTime
+                )
+                if isPlaying {
+                    isPlaying = false
+                    playTask?.cancel()
+                    playTask = nil
+                    resetPlaybackSpeed()
+                }
+            }
         } catch {
             runtimeMessage = "Simulation step failed: \(error.localizedDescription)"
             isPlaying = false
             playTask?.cancel()
             playTask = nil
             resetPlaybackSpeed()
+        }
+    }
+
+    private func updateLaneOccupanciesIfNeeded(session: RunningSUMOSession) async {
+        guard laneColorMode == .occupancy else { return }
+        guard let graph else { return }
+        let laneIDs = visibleLaneIDs(graph: graph, limit: 600)
+        guard laneIDs.isEmpty == false else { return }
+        do {
+            let occupancies = try await session.laneOccupancies(ids: laneIDs)
+            laneOccupancyByID.merge(occupancies) { _, new in new }
+        } catch {
+            runtimeMessage = "Lane occupancy update failed: \(error.localizedDescription)"
         }
     }
 
@@ -445,27 +1094,57 @@ final class SimulationViewModel: ObservableObject {
     }
 
     func selectEdge(_ id: String?) {
-        let nextID = (selectedEdgeID == id) ? nil : id
-        setSelectedEdge(nextID)
+        guard let id else {
+            selectedEdgeID = nil
+            return
+        }
+        if selectedEdgeID == id {
+            removeEdgeFromSelection(id)
+        } else {
+            setSelectedEdge(id)
+        }
     }
 
     func setSelectedEdge(_ id: String?) {
         selectedEdgeID = id
-        if id != nil {
+        if let id {
+            selectedEdgeIDs.insert(id)
             selectVehicle(nil)
             isFollowingSelectedVehicle = false
+            isRotatingWithSelectedVehicle = false
         }
+    }
+
+    func toggleEdgeSelection(_ id: String) {
+        if selectedEdgeIDs.contains(id) {
+            removeEdgeFromSelection(id)
+        } else {
+            selectedEdgeIDs.insert(id)
+            selectedEdgeID = id
+            runtimeMessage = "Added edge \(id) to selection"
+        }
+    }
+
+    func removeEdgeFromSelection(_ id: String) {
+        selectedEdgeIDs.remove(id)
+        selectedRouteEdgeIDs.remove(id)
+        if selectedEdgeID == id {
+            selectedEdgeID = nil
+        }
+        runtimeMessage = "Removed edge \(id) from selection"
     }
 
     func selectVehicle(_ id: String?) {
         guard selectedVehicleID != id else { return }
         selectedVehicleID = id
-        if id != nil {
+        if let id {
+            selectedVehicleIDs.insert(id)
             selectedEdgeID = nil
         }
         if id == nil {
             liveState.selectedVehicle = nil
             isFollowingSelectedVehicle = false
+            isRotatingWithSelectedVehicle = false
         }
         Task { @MainActor [weak self] in
             guard let self, let session = self.session else { return }
@@ -477,12 +1156,156 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    func toggleVehicleSelection(_ id: String) {
+        if selectedVehicleIDs.contains(id) {
+            removeVehicleFromSelection(id)
+        } else {
+            selectedVehicleIDs.insert(id)
+            selectVehicle(id)
+            runtimeMessage = "Added vehicle \(id) to selection"
+        }
+    }
+
+    func removeVehicleFromSelection(_ id: String) {
+        selectedVehicleIDs.remove(id)
+        if selectedVehicleID == id {
+            selectVehicle(nil)
+        }
+        if selectedVehicleIDs.isEmpty {
+            isFollowingSelectedVehicle = false
+            isRotatingWithSelectedVehicle = false
+        }
+        runtimeMessage = "Removed vehicle \(id) from selection"
+    }
+
+    func followVehicle(_ id: String) {
+        selectVehicle(id)
+        isFollowingSelectedVehicle = true
+    }
+
     func toggleFollowSelectedVehicle() {
         guard canFollowSelectedVehicle else {
             isFollowingSelectedVehicle = false
+            isRotatingWithSelectedVehicle = false
             return
         }
         isFollowingSelectedVehicle.toggle()
+        if !isFollowingSelectedVehicle {
+            isRotatingWithSelectedVehicle = false
+        }
+    }
+
+    func toggleRotateWithSelectedVehicle() {
+        guard isFollowingSelectedVehicle, canFollowSelectedVehicle else {
+            isRotatingWithSelectedVehicle = false
+            return
+        }
+        isRotatingWithSelectedVehicle.toggle()
+    }
+
+    func selectRouteEdges(_ edgeIDs: [String], vehicleID: String? = nil) {
+        let routeEdges = Set(edgeIDs.filter { !$0.isEmpty })
+        guard routeEdges.isEmpty == false else {
+            runtimeMessage = vehicleID.map { "No route edges available for vehicle \($0)." } ?? "No route edges available."
+            return
+        }
+        selectedRouteEdgeIDs = routeEdges
+        selectedEdgeIDs.formUnion(routeEdges)
+        if selectedEdgeID == nil {
+            selectedEdgeID = edgeIDs.first { !$0.isEmpty }
+        }
+        if let vehicleID {
+            runtimeMessage = "Selected route for vehicle \(vehicleID) (\(routeEdges.count) edges)"
+        } else {
+            runtimeMessage = "Selected route (\(routeEdges.count) edges)"
+        }
+    }
+
+    func selectRouteForVehicle(_ id: String) {
+        selectVehicle(id)
+        if let routeEdges = cachedRouteEdges(forVehicle: id), routeEdges.isEmpty == false {
+            selectRouteEdges(routeEdges, vehicleID: id)
+            return
+        }
+        guard let session else {
+            runtimeMessage = "Route edges for \(id) are unavailable until a SUMO session is active."
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            do {
+                let routeEdges = try await session.routeEdges(forVehicle: id)
+                guard let self else { return }
+                self.vehicleRouteCache[id] = Set(routeEdges)
+                self.vehicleRouteOrderCache[id] = routeEdges
+                self.selectRouteEdges(routeEdges, vehicleID: id)
+            } catch {
+                self?.runtimeMessage = "Route lookup failed for \(id): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func copyRouteForVehicle(_ id: String) {
+        if let routeEdges = cachedRouteEdges(forVehicle: id), routeEdges.isEmpty == false {
+            copyRouteEdges(routeEdges, vehicleID: id)
+            return
+        }
+        guard let session else {
+            runtimeMessage = "Route edges for \(id) are unavailable until a SUMO session is active."
+            return
+        }
+
+        Task { @MainActor [weak self] in
+            do {
+                let routeEdges = try await session.routeEdges(forVehicle: id)
+                guard let self else { return }
+                self.vehicleRouteCache[id] = Set(routeEdges)
+                self.vehicleRouteOrderCache[id] = routeEdges
+                self.copyRouteEdges(routeEdges, vehicleID: id)
+            } catch {
+                self?.runtimeMessage = "Route copy failed for \(id): \(error.localizedDescription)"
+            }
+        }
+    }
+
+    func clearSelection() {
+        selectedEdgeID = nil
+        selectedEdgeIDs = []
+        selectedVehicleIDs = []
+        selectedRouteEdgeIDs = []
+        isFollowingSelectedVehicle = false
+        isRotatingWithSelectedVehicle = false
+        selectVehicle(nil)
+    }
+
+    func copyObjectID(_ id: String, label: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(id, forType: .string)
+        runtimeMessage = "Copied \(label) ID \(id)"
+    }
+
+    private func cachedRouteEdges(forVehicle id: String) -> [String]? {
+        if let cached = vehicleRouteOrderCache[id] {
+            return cached
+        }
+        if let cached = vehicleRouteCache[id] {
+            return Array(cached).sorted()
+        }
+        guard liveState.selectedVehicle?.id == id else { return nil }
+        return liveState.selectedVehicle?.routeEdgeIDs
+    }
+
+    private func copyRouteEdges(_ routeEdges: [String], vehicleID: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(routeEdges.joined(separator: " "), forType: .string)
+        runtimeMessage = "Copied route for vehicle \(vehicleID) (\(routeEdges.count) edges)"
+    }
+
+    private func clearHoverRoutePreview() {
+        hoverRouteTask?.cancel()
+        hoverRouteTask = nil
+        hoveredVehicleID = nil
+        hoveredVehicleRouteEdgeIDs = []
     }
 
     private func startPlayback() {
@@ -505,6 +1328,7 @@ final class SimulationViewModel: ObservableObject {
         playTask = nil
         viewportSubscriptionTask?.cancel()
         viewportSubscriptionTask = nil
+        clearHoverRoutePreview()
         isPlaying = false
         resetPlaybackSpeed()
         if let session {
@@ -513,14 +1337,128 @@ final class SimulationViewModel: ObservableObject {
         session = nil
     }
 
-    private func resolveInputURL(_ url: URL) throws -> (netURL: URL, configURL: URL?) {
+    private func resolveInputURL(_ url: URL) throws -> (netURL: URL, configURL: URL?, additionalURLs: [URL]) {
         if url.lastPathComponent.hasSuffix(".net.xml") {
-            return (url, nil)
+            return (url, nil, [])
         }
         if url.pathExtension == "sumocfg" {
-            return (try SUMOConfigNetFileParser.netFileURL(in: url), url)
+            let parsed = try SUMOConfigNetFileParser.parse(configURL: url)
+            return (parsed.netURL, url, parsed.additionalURLs)
         }
-        return (url, nil)
+        return (url, nil, [])
+    }
+
+    private func visibleLaneIDs(graph: NetGraph, limit: Int) -> [String] {
+        let laneIndexes: [Int]
+        if let latestViewportBounds, let spatialIndexes {
+            let queried = spatialIndexes.lanes.query(in: latestViewportBounds)
+            laneIndexes = queried[..<min(limit, queried.count)].map(Int.init)
+        } else {
+            let allIndexes = Array(graph.lanes.indices)
+            laneIndexes = Array(allIndexes[..<min(limit, allIndexes.count)])
+        }
+        return laneIndexes.compactMap { index in
+            guard graph.lanes.indices.contains(index) else { return nil }
+            return graph.lanes[index].id
+        }
+    }
+
+    private func nearestJunction(to position: SIMD2<Float>, in graph: NetGraph) -> (id: String, distanceSquared: Float)? {
+        graph.junctions
+            .map { junction -> (id: String, distanceSquared: Float) in
+                let dx = position.x - junction.position.x
+                let dy = position.y - junction.position.y
+                return (junction.id, dx * dx + dy * dy)
+            }
+            .min { $0.distanceSquared < $1.distanceSquared }
+    }
+
+    private func inferredBackgroundWorldRect(for url: URL) -> SIMD4<Float> {
+        if let worldRect = worldFileRect(for: url) {
+            return worldRect
+        }
+        if let graph {
+            return graph.bounds()
+        }
+        return backgroundWorldRect
+    }
+
+    private func worldFileRect(for imageURL: URL) -> SIMD4<Float>? {
+        guard
+            let image = NSImage(contentsOf: imageURL),
+            image.size.width > 0,
+            image.size.height > 0
+        else {
+            return nil
+        }
+        let candidates = worldFileCandidates(for: imageURL)
+        guard
+            let worldURL = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+            let content = try? String(contentsOf: worldURL, encoding: .utf8)
+        else {
+            return nil
+        }
+        let values = content
+            .split(whereSeparator: \.isNewline)
+            .compactMap { Double($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        guard values.count >= 6 else { return nil }
+
+        let a = values[0]
+        let d = values[1]
+        let b = values[2]
+        let e = values[3]
+        let c = values[4]
+        let f = values[5]
+        let width = Double(image.size.width)
+        let height = Double(image.size.height)
+        let corners = [
+            worldFilePoint(column: 0, row: 0, a: a, b: b, c: c, d: d, e: e, f: f),
+            worldFilePoint(column: width, row: 0, a: a, b: b, c: c, d: d, e: e, f: f),
+            worldFilePoint(column: 0, row: height, a: a, b: b, c: c, d: d, e: e, f: f),
+            worldFilePoint(column: width, row: height, a: a, b: b, c: c, d: d, e: e, f: f),
+        ]
+        let xs = corners.map(\.x)
+        let ys = corners.map(\.y)
+        guard
+            let minX = xs.min(),
+            let minY = ys.min(),
+            let maxX = xs.max(),
+            let maxY = ys.max()
+        else {
+            return nil
+        }
+        return SIMD4(Float(minX), Float(minY), Float(maxX), Float(maxY))
+    }
+
+    private func worldFilePoint(
+        column: Double,
+        row: Double,
+        a: Double,
+        b: Double,
+        c: Double,
+        d: Double,
+        e: Double,
+        f: Double
+    ) -> SIMD2<Double> {
+        SIMD2(a * column + b * row + c, d * column + e * row + f)
+    }
+
+    private func worldFileCandidates(for url: URL) -> [URL] {
+        let directory = url.deletingLastPathComponent()
+        let basename = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension.lowercased()
+        var names = ["\(basename).wld"]
+        switch ext {
+        case "png":
+            names.append("\(basename).pgw")
+        case "jpg", "jpeg":
+            names.append("\(basename).jgw")
+        case "tif", "tiff", "geotiff":
+            names.append("\(basename).tfw")
+        default:
+            break
+        }
+        return names.map { directory.appendingPathComponent($0) }
     }
 
     private func presentAttachSettings(for url: URL) {
@@ -571,6 +1509,42 @@ final class SimulationViewModel: ObservableObject {
 
     private func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func connectionMessage(prefix: String, session: RunningSUMOSession, suffix: String = "") -> String {
+        let base = "\(prefix) to \(session.versionIdentifier)\(suffix)"
+        guard let warning = session.versionWarning else { return base }
+        return "\(base). \(warning)"
+    }
+
+    private func rememberRecentDocument(_ url: URL) {
+        let standardized = url.standardizedFileURL
+        recentDocuments.removeAll { $0.id == standardized.path }
+        recentDocuments.insert(RecentDocument(url: standardized), at: 0)
+        if recentDocuments.count > Self.maxRecentDocumentCount {
+            recentDocuments.removeSubrange(Self.maxRecentDocumentCount..<recentDocuments.count)
+        }
+        persistRecentDocuments()
+    }
+
+    private func persistRecentDocuments() {
+        userDefaults.set(recentDocuments.map(\.url.path), forKey: Self.recentDocumentsKey)
+    }
+
+    private static func loadRecentDocuments(from userDefaults: UserDefaults) -> [RecentDocument] {
+        let paths = userDefaults.stringArray(forKey: recentDocumentsKey) ?? []
+        var seen = Set<String>()
+        var documents: [RecentDocument] = []
+        documents.reserveCapacity(min(paths.count, maxRecentDocumentCount))
+        for path in paths {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            guard seen.insert(url.path).inserted else { continue }
+            documents.append(RecentDocument(url: url))
+            if documents.count == maxRecentDocumentCount {
+                break
+            }
+        }
+        return documents
     }
 
     private func defaultScreenshotFilename() -> String {
@@ -647,8 +1621,14 @@ enum ViewportSubscriptionPlanner {
 }
 
 private final class SUMOConfigNetFileParser: NSObject, XMLParserDelegate {
+    struct ParsedConfig {
+        let netURL: URL
+        let additionalURLs: [URL]
+    }
+
     private let baseURL: URL
     private var netFileValue: String?
+    private var additionalFileValues: [String] = []
     private var parseError: Error?
 
     private init(baseURL: URL) {
@@ -656,6 +1636,10 @@ private final class SUMOConfigNetFileParser: NSObject, XMLParserDelegate {
     }
 
     static func netFileURL(in configURL: URL) throws -> URL {
+        try parse(configURL: configURL).netURL
+    }
+
+    static func parse(configURL: URL) throws -> ParsedConfig {
         guard let parser = XMLParser(contentsOf: configURL) else {
             throw CocoaError(.fileReadUnknown, userInfo: [NSFilePathErrorKey: configURL.path])
         }
@@ -668,7 +1652,17 @@ private final class SUMOConfigNetFileParser: NSObject, XMLParserDelegate {
         guard let value = delegate.netFileValue else {
             throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "No <net-file> entry found in \(configURL.lastPathComponent)."])
         }
-        return URL(fileURLWithPath: value, relativeTo: delegate.baseURL).standardizedFileURL
+        let additionalURLs = delegate.additionalFileValues.flatMap { value in
+            value
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { $0.isEmpty == false }
+                .map { URL(fileURLWithPath: $0, relativeTo: delegate.baseURL).standardizedFileURL }
+        }
+        return ParsedConfig(
+            netURL: URL(fileURLWithPath: value, relativeTo: delegate.baseURL).standardizedFileURL,
+            additionalURLs: additionalURLs
+        )
     }
 
     func parser(_ parser: XMLParser, didStartElement elementName: String,
@@ -676,6 +1670,9 @@ private final class SUMOConfigNetFileParser: NSObject, XMLParserDelegate {
                 attributes attributeDict: [String: String] = [:]) {
         if elementName == "net-file", let value = attributeDict["value"], netFileValue == nil {
             netFileValue = value
+        }
+        if elementName == "additional-files", let value = attributeDict["value"] {
+            additionalFileValues.append(value)
         }
     }
 

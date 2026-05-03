@@ -34,11 +34,14 @@ public extension TraCIClient {
         public static let angle: UInt8         = 0x43
         public static let typeID: UInt8        = 0x4F
         public static let routeID: UInt8       = 0x53
+        public static let edges: UInt8         = 0x54
         public static let route: UInt8         = 0x57
         public static let lengthVar: UInt8     = 0x44
         public static let widthVar: UInt8      = 0x4D
         public static let color: UInt8         = 0x45
+        public static let co2Emission: UInt8   = 0x60
         public static let acceleration: UInt8  = 0x72
+        public static let lastStepOccupancy: UInt8 = 0x13
         public static let lanePosition: UInt8  = 0x56
         public static let edgeID: UInt8        = 0x50
         public static let laneID: UInt8        = 0x51
@@ -49,6 +52,19 @@ public extension TraCIClient {
         public static let minExpected: UInt8   = 0x7D
         public static let arrivedNumber: UInt8 = 0x79
         public static let departedNumber: UInt8 = 0x73
+    }
+
+    // MARK: generic domain helpers
+
+    func idList(commandID: UInt8) async throws -> [String] {
+        try (await get(commandID: commandID, variableID: Var.idList, objectID: "")).asStringList ?? []
+    }
+
+    func idCount(commandID: UInt8) async throws -> Int32 {
+        if case .integer(let value) = try await get(commandID: commandID, variableID: Var.idCount, objectID: "") {
+            return value
+        }
+        return 0
     }
 
     // MARK: simulation
@@ -65,11 +81,32 @@ public extension TraCIClient {
         }
         return 0
     }
+    func simLoadedNumber() async throws -> Int32 {
+        if case .integer(let value) = try await get(commandID: DomainCmd.getSim, variableID: Var.loadedNumber, objectID: "") {
+            return value
+        }
+        return 0
+    }
+    func simArrivedNumber() async throws -> Int32 {
+        if case .integer(let value) = try await get(commandID: DomainCmd.getSim, variableID: Var.arrivedNumber, objectID: "") {
+            return value
+        }
+        return 0
+    }
+    func simDepartedNumber() async throws -> Int32 {
+        if case .integer(let value) = try await get(commandID: DomainCmd.getSim, variableID: Var.departedNumber, objectID: "") {
+            return value
+        }
+        return 0
+    }
 
     // MARK: vehicle
 
     func vehicleIDs() async throws -> [String] {
-        try (await get(commandID: DomainCmd.getVehicle, variableID: Var.idList, objectID: "")).asStringList ?? []
+        try await idList(commandID: DomainCmd.getVehicle)
+    }
+    func vehicleCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getVehicle)
     }
     func vehiclePosition(_ id: String) async throws -> SIMD2<Double> {
         try (await get(commandID: DomainCmd.getVehicle, variableID: Var.position, objectID: id)).asPosition2D ?? .zero
@@ -83,20 +120,71 @@ public extension TraCIClient {
     func vehicleType(_ id: String) async throws -> String {
         try (await get(commandID: DomainCmd.getVehicle, variableID: Var.typeID, objectID: id)).asString ?? ""
     }
+    func vehicleRoute(_ id: String) async throws -> [String] {
+        try (await get(commandID: DomainCmd.getVehicle, variableID: Var.edges, objectID: id)).asStringList ?? []
+    }
 
     // MARK: edge / lane / junction id-list helpers
 
     func edgeIDs() async throws -> [String] {
-        try (await get(commandID: DomainCmd.getEdge, variableID: Var.idList, objectID: "")).asStringList ?? []
+        try await idList(commandID: DomainCmd.getEdge)
+    }
+    func edgeCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getEdge)
     }
     func laneIDs() async throws -> [String] {
-        try (await get(commandID: DomainCmd.getLane, variableID: Var.idList, objectID: "")).asStringList ?? []
+        try await idList(commandID: DomainCmd.getLane)
+    }
+    func laneCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getLane)
+    }
+    func laneSpeed(_ id: String) async throws -> Double {
+        try (await get(commandID: DomainCmd.getLane, variableID: Var.speed, objectID: id)).asDouble ?? 0
+    }
+    func laneLength(_ id: String) async throws -> Double {
+        try (await get(commandID: DomainCmd.getLane, variableID: Var.lengthVar, objectID: id)).asDouble ?? 0
+    }
+    func laneLastStepOccupancy(_ id: String) async throws -> Double {
+        try (await get(commandID: DomainCmd.getLane, variableID: Var.lastStepOccupancy, objectID: id)).asDouble ?? 0
     }
     func junctionIDs() async throws -> [String] {
-        try (await get(commandID: DomainCmd.getJunction, variableID: Var.idList, objectID: "")).asStringList ?? []
+        try await idList(commandID: DomainCmd.getJunction)
+    }
+    func junctionCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getJunction)
     }
     func tlIDs() async throws -> [String] {
-        try (await get(commandID: DomainCmd.getTL, variableID: Var.idList, objectID: "")).asStringList ?? []
+        try await idList(commandID: DomainCmd.getTL)
+    }
+    func tlCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getTL)
+    }
+    func routeIDs() async throws -> [String] {
+        try await idList(commandID: DomainCmd.getRoute)
+    }
+    func routeCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getRoute)
+    }
+    func routeEdges(_ id: String) async throws -> [String] {
+        try (await get(commandID: DomainCmd.getRoute, variableID: Var.edges, objectID: id)).asStringList ?? []
+    }
+    func poiIDs() async throws -> [String] {
+        try await idList(commandID: DomainCmd.getPOI)
+    }
+    func poiCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getPOI)
+    }
+    func polygonIDs() async throws -> [String] {
+        try await idList(commandID: DomainCmd.getPolygon)
+    }
+    func polygonCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getPolygon)
+    }
+    func guiViewIDs() async throws -> [String] {
+        try await idList(commandID: DomainCmd.getGUI)
+    }
+    func guiViewCount() async throws -> Int32 {
+        try await idCount(commandID: DomainCmd.getGUI)
     }
 
     // MARK: high-level subscription helpers
@@ -109,7 +197,7 @@ public extension TraCIClient {
             objectID: egoID,
             domain: DomainCmd.getVehicle,
             range: range,
-            variables: [Var.position, Var.angle, Var.speed, Var.typeID]
+            variables: [Var.position, Var.angle, Var.speed, Var.typeID, Var.acceleration, Var.routeID, Var.co2Emission, Var.color]
         )
     }
 
@@ -120,7 +208,7 @@ public extension TraCIClient {
             objectID: junctionID,
             domain: DomainCmd.getVehicle,
             range: range,
-            variables: [Var.position, Var.angle, Var.speed, Var.typeID]
+            variables: [Var.position, Var.angle, Var.speed, Var.typeID, Var.acceleration, Var.routeID, Var.co2Emission, Var.color]
         )
     }
 

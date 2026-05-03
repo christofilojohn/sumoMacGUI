@@ -29,55 +29,7 @@ public actor TraCIClient {
         let body = try await sendCommand(commandID: TraCI.Command.simulationStep.rawValue, payload: p.data)
 
         var r = TraCIReader(body)
-        guard !r.isAtEnd else { return [] }
-        let count = Int(try r.readI32())
-        var out: [(UInt8, SubscriptionResult)] = []
-        out.reserveCapacity(count)
-        for _ in 0..<count {
-            // Each entry: lenHeader, respCmd, objectID, numVars, [varID, status, typedVal]...
-            // Context responses also include a contextDomain byte; not used in plain VARIABLE subs.
-            _ = try r.readCommandLengthHeader()
-            let cmd = try r.readU8()
-            let objectID = try r.readString()
-            // Variable-vs-context responses both look the same after objectID for plain variable subs.
-            // For context: an extra "contextDomain" byte then count of objects.
-            let isContext = (cmd >= 0x90 && cmd < 0xA0)
-            if isContext {
-                _ = try r.readU8()                           // context domain (ignored for now)
-                let variableCount = Int(try r.readU8())
-                let nObjects = Int(try r.readI32())
-                var perObj: [String: [UInt8: TraCIValue]] = [:]
-                perObj.reserveCapacity(nObjects)
-                for _ in 0..<nObjects {
-                    let oid = try r.readString()
-                    var vals: [UInt8: TraCIValue] = [:]
-                    vals.reserveCapacity(variableCount)
-                    for _ in 0..<variableCount {
-                        let v = try r.readU8()
-                        let st = try r.readU8()
-                        if st != 0 { _ = try r.readTyped(); continue }
-                        vals[v] = try r.readTyped()
-                    }
-                    perObj[oid] = vals
-                }
-                // Flatten context as one synthetic SubscriptionResult per object for caller convenience.
-                for (oid, vals) in perObj {
-                    out.append((cmd, SubscriptionResult(objectID: "\(objectID)::\(oid)", values: vals)))
-                }
-            } else {
-                let nVars = Int(try r.readU8())
-                var vals: [UInt8: TraCIValue] = [:]
-                vals.reserveCapacity(nVars)
-                for _ in 0..<nVars {
-                    let v = try r.readU8()
-                    let st = try r.readU8()
-                    if st != 0 { _ = try r.readTyped(); continue }
-                    vals[v] = try r.readTyped()
-                }
-                out.append((cmd, SubscriptionResult(objectID: objectID, values: vals)))
-            }
-        }
-        return out
+        return try r.readSubscriptionResponses()
     }
 
     public func close() async throws {

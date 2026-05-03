@@ -10,6 +10,7 @@ final class RunningSUMOSession {
     private var selectedVehicleDetails: VehicleDetails?
 
     let versionIdentifier: String
+    let versionWarning: String?
     let isAttachedToExternalSUMO: Bool
 
     private init(
@@ -17,12 +18,14 @@ final class RunningSUMOSession {
         connection: TraCIConnection,
         client: TraCIClient,
         versionIdentifier: String,
+        versionWarning: String?,
         isAttachedToExternalSUMO: Bool
     ) {
         self.handle = handle
         self.connection = connection
         self.client = client
         self.versionIdentifier = versionIdentifier
+        self.versionWarning = versionWarning
         self.isAttachedToExternalSUMO = isAttachedToExternalSUMO
     }
 
@@ -40,6 +43,7 @@ final class RunningSUMOSession {
         try await connection.connect()
         let client = TraCIClient(connection: connection)
         let version = try await client.getVersion()
+        let compatibility = SumoVersionCompatibility(apiVersion: version.apiVersion, identifier: version.identifier)
         try await client.subscribeSimulation()
         if let subscriptionAnchorID {
             try await client.subscribeVehiclesAroundJunction(subscriptionAnchorID)
@@ -49,7 +53,8 @@ final class RunningSUMOSession {
             handle: handle,
             connection: connection,
             client: client,
-            versionIdentifier: version.identifier,
+            versionIdentifier: compatibility.identifier,
+            versionWarning: compatibility.warning,
             isAttachedToExternalSUMO: false
         )
         if let subscriptionAnchorID {
@@ -72,6 +77,7 @@ final class RunningSUMOSession {
         let client = TraCIClient(connection: connection)
         try await client.setOrder(clientOrder)
         let version = try await client.getVersion()
+        let compatibility = SumoVersionCompatibility(apiVersion: version.apiVersion, identifier: version.identifier)
         try await client.subscribeSimulation()
         if let subscriptionAnchorID {
             try await client.subscribeVehiclesAroundJunction(subscriptionAnchorID)
@@ -81,7 +87,8 @@ final class RunningSUMOSession {
             handle: nil,
             connection: connection,
             client: client,
-            versionIdentifier: version.identifier,
+            versionIdentifier: compatibility.identifier,
+            versionWarning: compatibility.warning,
             isAttachedToExternalSUMO: true
         )
         if let subscriptionAnchorID {
@@ -105,12 +112,17 @@ final class RunningSUMOSession {
             let angle = Float(result.values[TraCIClient.Var.angle]?.asDouble ?? 0)
             let speed = Float(result.values[TraCIClient.Var.speed]?.asDouble ?? 0)
             let typeID = stableTypeID(from: result.values[TraCIClient.Var.typeID]?.asString ?? "")
+            let routeID = result.values[TraCIClient.Var.routeID]?.asString
             snapshots.append(VehicleSnapshot(
                 id: vehicleID,
                 position: SIMD2(Float(position.x), Float(position.y)),
                 angle: angle,
                 speed: speed,
-                typeID: typeID
+                typeID: typeID,
+                acceleration: result.values[TraCIClient.Var.acceleration]?.asDouble.map(Float.init),
+                co2Emission: result.values[TraCIClient.Var.co2Emission]?.asDouble.map(Float.init),
+                routeID: routeID,
+                color: result.values[TraCIClient.Var.color]?.asColor
             ))
         }
 
@@ -143,6 +155,19 @@ final class RunningSUMOSession {
         viewportSubscription = next
     }
 
+    func routeEdges(forVehicle id: String) async throws -> [String] {
+        try await client.vehicleRoute(id)
+    }
+
+    func laneOccupancies(ids: [String]) async throws -> [String: Float] {
+        var values: [String: Float] = [:]
+        values.reserveCapacity(ids.count)
+        for id in ids {
+            values[id] = Float(try await client.laneLastStepOccupancy(id))
+        }
+        return values
+    }
+
     func selectVehicle(_ id: String?) async throws {
         if selectedVehicleID == id {
             return
@@ -154,6 +179,7 @@ final class RunningSUMOSession {
         selectedVehicleDetails = id.map { VehicleDetails(id: $0) }
         if let id {
             try await client.subscribeVehicleDetails(id)
+            selectedVehicleDetails?.routeEdgeIDs = (try? await client.vehicleRoute(id)) ?? []
         }
     }
 
@@ -220,6 +246,7 @@ final class RunningSUMOSession {
             edgeID: values[TraCIClient.Var.edgeID]?.asString,
             laneID: values[TraCIClient.Var.laneID]?.asString,
             routeID: values[TraCIClient.Var.routeID]?.asString,
+            routeEdgeIDs: selectedVehicleDetails?.routeEdgeIDs ?? [],
             typeID: values[TraCIClient.Var.typeID]?.asString,
             length: values[TraCIClient.Var.lengthVar]?.asDouble.map(Float.init),
             width: values[TraCIClient.Var.widthVar]?.asDouble.map(Float.init)

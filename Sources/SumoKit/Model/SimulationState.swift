@@ -22,13 +22,31 @@ public struct VehicleSnapshot: Sendable, Identifiable {
     public var angle: Float
     public var speed: Float
     public var typeID: UInt32
+    public var acceleration: Float?
+    public var co2Emission: Float?
+    public var routeID: String?
+    public var color: SumoColor?
 
-    public init(id: String, position: SIMD2<Float>, angle: Float, speed: Float, typeID: UInt32) {
+    public init(
+        id: String,
+        position: SIMD2<Float>,
+        angle: Float,
+        speed: Float,
+        typeID: UInt32,
+        acceleration: Float? = nil,
+        co2Emission: Float? = nil,
+        routeID: String? = nil,
+        color: SumoColor? = nil
+    ) {
         self.id = id
         self.position = position
         self.angle = angle
         self.speed = speed
         self.typeID = typeID
+        self.acceleration = acceleration
+        self.co2Emission = co2Emission
+        self.routeID = routeID
+        self.color = color
     }
 }
 
@@ -42,6 +60,7 @@ public struct VehicleDetails: Sendable, Equatable, Identifiable {
     public var edgeID: String?
     public var laneID: String?
     public var routeID: String?
+    public var routeEdgeIDs: [String]
     public var typeID: String?
     public var length: Float?
     public var width: Float?
@@ -56,6 +75,7 @@ public struct VehicleDetails: Sendable, Equatable, Identifiable {
         edgeID: String? = nil,
         laneID: String? = nil,
         routeID: String? = nil,
+        routeEdgeIDs: [String] = [],
         typeID: String? = nil,
         length: Float? = nil,
         width: Float? = nil
@@ -69,6 +89,7 @@ public struct VehicleDetails: Sendable, Equatable, Identifiable {
         self.edgeID = edgeID
         self.laneID = laneID
         self.routeID = routeID
+        self.routeEdgeIDs = routeEdgeIDs
         self.typeID = typeID
         self.length = length
         self.width = width

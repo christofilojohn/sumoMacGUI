@@ -28,6 +28,12 @@ public enum TraCIValue: Sendable, Equatable {
         if case .position2D(let x, let y) = self { return SIMD2(x, y) }
         return nil
     }
+    public var asColor: SumoColor? {
+        if case .color(let red, let green, let blue, let alpha) = self {
+            return SumoColor(red: red, green: green, blue: blue, alpha: alpha)
+        }
+        return nil
+    }
 }
 
 public enum TraCITypeCode {

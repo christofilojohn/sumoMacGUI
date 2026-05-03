@@ -14,11 +14,22 @@ final class RunningSUMOSessionTests: XCTestCase {
         let first = try await session.step()
         let second = try await session.step()
         let third = try await session.step()
+        try await session.selectVehicle("v0")
+        var selectedVehicleState: SimulationState?
+        for _ in 0..<3 {
+            let state = try await session.step()
+            selectedVehicleState = state
+            if state.selectedVehicle?.routeEdgeIDs.isEmpty == false {
+                break
+            }
+        }
         await session.close()
 
         XCTAssertGreaterThan(second.simTime, first.simTime)
         XCTAssertGreaterThan(third.simTime, second.simTime)
         XCTAssertGreaterThan(max(first.vehicles.count, second.vehicles.count, third.vehicles.count), 0, "expected vehicles to appear after stepping")
+        XCTAssertEqual(selectedVehicleState?.selectedVehicle?.routeID, "r")
+        XCTAssertEqual(selectedVehicleState?.selectedVehicle?.routeEdgeIDs, ["e1", "e2"])
     }
 
     private func makeTinyScenario() throws -> URL {

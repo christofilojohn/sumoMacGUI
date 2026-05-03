@@ -5,6 +5,7 @@ import SumoKit
 final class ViewportState: ObservableObject {
     private(set) var center = SIMD2<Float>(0, 0)
     private(set) var pointsPerWorldUnit: Float = 1
+    private(set) var rotationRadians: Float = 0
     private(set) var isConfigured = false
     private var pinchLastMagnification: CGFloat = 1
 
@@ -18,12 +19,14 @@ final class ViewportState: ObservableObject {
 
         center = SIMD2((netBounds.x + netBounds.z) * 0.5, (netBounds.y + netBounds.w) * 0.5)
         pointsPerWorldUnit = min(availableWidth / width, availableHeight / height)
+        rotationRadians = 0
         isConfigured = true
         onChange?()
     }
 
     func requestFit() {
         isConfigured = false
+        rotationRadians = 0
         onChange?()
     }
 
@@ -36,6 +39,18 @@ final class ViewportState: ObservableObject {
     func center(on point: SIMD2<Float>) {
         guard isConfigured else { return }
         center = point
+        onChange?()
+    }
+
+    func setRotationDegrees(_ degrees: Float) {
+        guard degrees.isFinite else { return }
+        rotationRadians = degrees * .pi / 180
+        onChange?()
+    }
+
+    func resetRotation() {
+        guard rotationRadians != 0 else { return }
+        rotationRadians = 0
         onChange?()
     }
 

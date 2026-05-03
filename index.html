@@ -1,0 +1,958 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="SumoGUIMac is a native macOS lightweight SUMO scenario viewer and TraCI inspection tool built with SwiftUI and Metal.">
+  <meta property="og:title" content="SumoGUIMac">
+  <meta property="og:description" content="A native macOS lightweight alternative to sumo-gui for opening, running, visualizing, and inspecting SUMO scenarios.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="Sources/SumoGUIMac/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-512.png">
+  <meta name="theme-color" content="#11151a">
+  <title>SumoGUIMac - Native macOS SUMO viewer</title>
+  <link rel="icon" href="Sources/SumoGUIMac/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-64.png">
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #f7f3ea;
+      --muted: #b8c0c6;
+      --dim: #828b95;
+      --night: #11151a;
+      --panel: #171d22;
+      --panel-2: #20272d;
+      --line: rgba(255, 255, 255, 0.14);
+      --amber: #ff9b3d;
+      --teal: #2bd0c6;
+      --leaf: #8fd66b;
+      --coral: #ff6b5f;
+      --violet: #9a8cff;
+      --shadow: rgba(0, 0, 0, 0.38);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--night);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    .site-header {
+      position: fixed;
+      z-index: 20;
+      inset: 0 0 auto 0;
+      height: 72px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 clamp(18px, 4vw, 56px);
+      background: rgba(17, 21, 26, 0.72);
+      border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+      backdrop-filter: blur(18px);
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      font-weight: 760;
+      letter-spacing: 0;
+    }
+
+    .brand img {
+      width: 38px;
+      height: 38px;
+      border-radius: 8px;
+      box-shadow: 0 12px 26px var(--shadow);
+    }
+
+    .nav {
+      display: flex;
+      align-items: center;
+      gap: 22px;
+      color: var(--muted);
+      font-size: 0.94rem;
+    }
+
+    .nav a:hover {
+      color: var(--ink);
+    }
+
+    .nav .button {
+      color: #14181c;
+    }
+
+    .button {
+      display: inline-flex;
+      min-height: 42px;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 0 18px;
+      border: 1px solid transparent;
+      border-radius: 8px;
+      background: var(--amber);
+      color: #14181c;
+      font-weight: 760;
+      box-shadow: 0 14px 34px rgba(255, 155, 61, 0.22);
+      transition: transform 160ms ease, box-shadow 160ms ease, border-color 160ms ease;
+    }
+
+    .button:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 18px 42px rgba(255, 155, 61, 0.28);
+    }
+
+    .button.secondary {
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--ink);
+      border-color: rgba(255, 255, 255, 0.18);
+      box-shadow: none;
+    }
+
+    .hero {
+      position: relative;
+      min-height: 92vh;
+      display: flex;
+      align-items: center;
+      overflow: hidden;
+      padding: 120px clamp(22px, 5vw, 72px) 72px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+    }
+
+    #traffic-scene {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      opacity: 0.92;
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        linear-gradient(90deg, rgba(17, 21, 26, 0.95) 0%, rgba(17, 21, 26, 0.76) 48%, rgba(17, 21, 26, 0.38) 100%),
+        linear-gradient(0deg, rgba(17, 21, 26, 0.92) 0%, rgba(17, 21, 26, 0.08) 42%, rgba(17, 21, 26, 0.62) 100%);
+      pointer-events: none;
+    }
+
+    .hero-content {
+      position: relative;
+      z-index: 2;
+      width: min(760px, 100%);
+    }
+
+    .hero-logo {
+      width: clamp(92px, 12vw, 138px);
+      height: clamp(92px, 12vw, 138px);
+      border-radius: 22px;
+      margin-bottom: 28px;
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.46);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      margin: 0 0 14px;
+      color: var(--teal);
+      font-size: 0.88rem;
+      font-weight: 760;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 26px;
+      height: 2px;
+      background: var(--teal);
+    }
+
+    h1 {
+      margin: 0;
+      max-width: 11ch;
+      color: var(--ink);
+      font-size: clamp(4rem, 12vw, 9.6rem);
+      line-height: 0.88;
+      letter-spacing: 0;
+    }
+
+    .hero-copy {
+      margin: 28px 0 0;
+      max-width: 650px;
+      color: #d8dde0;
+      font-size: clamp(1.12rem, 1.8vw, 1.38rem);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 34px;
+    }
+
+    .status-strip {
+      position: absolute;
+      z-index: 3;
+      left: clamp(22px, 5vw, 72px);
+      right: clamp(22px, 5vw, 72px);
+      bottom: 0;
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      border-bottom: 0;
+      background: rgba(20, 25, 30, 0.82);
+      backdrop-filter: blur(20px);
+      box-shadow: 0 -20px 60px rgba(0, 0, 0, 0.18);
+    }
+
+    .status-item {
+      padding: 18px 20px;
+      border-right: 1px solid rgba(255, 255, 255, 0.10);
+    }
+
+    .status-item:last-child {
+      border-right: 0;
+    }
+
+    .status-item strong {
+      display: block;
+      font-size: 1.28rem;
+      line-height: 1.1;
+    }
+
+    .status-item span {
+      display: block;
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    main {
+      background:
+        linear-gradient(180deg, #11151a 0%, #15191d 42%, #101316 100%);
+    }
+
+    .section {
+      padding: clamp(58px, 8vw, 108px) clamp(22px, 5vw, 72px);
+    }
+
+    .section-inner {
+      width: min(1160px, 100%);
+      margin: 0 auto;
+    }
+
+    .section-heading {
+      max-width: 760px;
+      margin-bottom: 34px;
+    }
+
+    h2 {
+      margin: 0;
+      color: var(--ink);
+      font-size: clamp(2rem, 4.5vw, 4.2rem);
+      line-height: 1;
+      letter-spacing: 0;
+    }
+
+    .section-heading p {
+      margin: 18px 0 0;
+      color: var(--muted);
+      font-size: 1.08rem;
+    }
+
+    .capability-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .card {
+      min-height: 214px;
+      padding: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 18px 54px rgba(0, 0, 0, 0.16);
+    }
+
+    .card .accent {
+      width: 38px;
+      height: 4px;
+      margin-bottom: 28px;
+      border-radius: 999px;
+      background: var(--teal);
+    }
+
+    .card:nth-child(2) .accent,
+    .card:nth-child(5) .accent {
+      background: var(--amber);
+    }
+
+    .card:nth-child(3) .accent {
+      background: var(--leaf);
+    }
+
+    .card:nth-child(4) .accent {
+      background: var(--coral);
+    }
+
+    .card:nth-child(6) .accent {
+      background: var(--violet);
+    }
+
+    .card h3 {
+      margin: 0;
+      font-size: 1.22rem;
+      letter-spacing: 0;
+    }
+
+    .card p {
+      margin: 12px 0 0;
+      color: var(--muted);
+    }
+
+    .product-band {
+      display: grid;
+      grid-template-columns: minmax(0, 1.03fr) minmax(320px, 0.97fr);
+      gap: clamp(26px, 5vw, 72px);
+      align-items: center;
+      background: #ece6d8;
+      color: #171d22;
+    }
+
+    .product-band .section-inner {
+      display: contents;
+    }
+
+    .product-copy {
+      max-width: 650px;
+      padding-left: clamp(22px, 5vw, 72px);
+    }
+
+    .product-copy h2 {
+      color: #171d22;
+    }
+
+    .product-copy p {
+      color: #44505a;
+      font-size: 1.08rem;
+    }
+
+    .mock-window {
+      margin-right: clamp(22px, 5vw, 72px);
+      border: 1px solid rgba(17, 23, 29, 0.18);
+      border-radius: 8px;
+      background: #151a20;
+      box-shadow: 0 34px 80px rgba(31, 36, 40, 0.28);
+      overflow: hidden;
+    }
+
+    .mock-top {
+      height: 44px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 0 14px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      background: #20262d;
+    }
+
+    .dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+      background: var(--coral);
+    }
+
+    .dot:nth-child(2) {
+      background: var(--amber);
+    }
+
+    .dot:nth-child(3) {
+      background: var(--leaf);
+    }
+
+    .mock-body {
+      display: grid;
+      grid-template-columns: 0.72fr 1.6fr 0.86fr;
+      min-height: 380px;
+    }
+
+    .mock-sidebar,
+    .mock-inspector {
+      padding: 18px;
+      background: #1b2127;
+    }
+
+    .mock-map {
+      position: relative;
+      overflow: hidden;
+      min-height: 380px;
+      background: #10151a;
+    }
+
+    .mock-map canvas {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .row {
+      height: 10px;
+      margin-bottom: 14px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .row.short {
+      width: 58%;
+    }
+
+    .row.medium {
+      width: 78%;
+    }
+
+    .row.active {
+      height: 32px;
+      border-radius: 8px;
+      background: rgba(255, 155, 61, 0.24);
+      border: 1px solid rgba(255, 155, 61, 0.38);
+    }
+
+    .ship-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+    .ship-panel {
+      padding: 28px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 8px;
+      background: var(--panel-2);
+    }
+
+    .ship-panel h3 {
+      margin: 0 0 14px;
+      font-size: 1.3rem;
+    }
+
+    .check-list {
+      display: grid;
+      gap: 12px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      color: var(--muted);
+    }
+
+    .check-list li {
+      display: grid;
+      grid-template-columns: 18px 1fr;
+      gap: 10px;
+    }
+
+    .check-list li::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      margin-top: 7px;
+      border-radius: 50%;
+      background: var(--teal);
+    }
+
+    .ship-panel.pending .check-list li::before {
+      background: var(--amber);
+    }
+
+    .install {
+      border-top: 1px solid rgba(255, 255, 255, 0.10);
+    }
+
+    .terminal {
+      margin-top: 24px;
+      border: 1px solid rgba(255, 255, 255, 0.13);
+      border-radius: 8px;
+      background: #0b0f12;
+      overflow: hidden;
+    }
+
+    .terminal-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 42px;
+      padding: 0 16px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      color: var(--dim);
+      font-size: 0.88rem;
+    }
+
+    pre {
+      margin: 0;
+      padding: 22px;
+      overflow-x: auto;
+      color: #e8efe9;
+      font: 0.95rem/1.7 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    .credit {
+      border-top: 1px solid rgba(255, 255, 255, 0.10);
+      background: #11151a;
+    }
+
+    .credit p {
+      max-width: 840px;
+      color: var(--muted);
+    }
+
+    .footer {
+      display: flex;
+      justify-content: space-between;
+      gap: 20px;
+      padding: 34px clamp(22px, 5vw, 72px);
+      color: var(--dim);
+      border-top: 1px solid rgba(255, 255, 255, 0.10);
+    }
+
+    @media (max-width: 920px) {
+      .nav a:not(.button) {
+        display: none;
+      }
+
+      .hero {
+        min-height: 900px;
+        align-items: flex-start;
+      }
+
+      .status-strip {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .status-item:nth-child(2) {
+        border-right: 0;
+      }
+
+      .status-item:nth-child(1),
+      .status-item:nth-child(2) {
+        border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      }
+
+      .capability-grid,
+      .ship-grid,
+      .product-band {
+        grid-template-columns: 1fr;
+      }
+
+      .product-copy {
+        padding: 64px 22px 0;
+      }
+
+      .mock-window {
+        margin: 0 22px 64px;
+      }
+    }
+
+    @media (max-width: 640px) {
+      .site-header {
+        height: 64px;
+      }
+
+      .brand span {
+        display: none;
+      }
+
+      .hero {
+        min-height: 940px;
+        padding-top: 98px;
+      }
+
+      h1 {
+        font-size: clamp(3.4rem, 18vw, 5.6rem);
+      }
+
+      .hero-actions {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .status-strip {
+        grid-template-columns: 1fr;
+      }
+
+      .status-item {
+        border-right: 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+      }
+
+      .status-item:last-child {
+        border-bottom: 0;
+      }
+
+      .mock-body {
+        grid-template-columns: 1fr;
+      }
+
+      .mock-sidebar,
+      .mock-inspector {
+        min-height: 150px;
+      }
+
+      .footer {
+        flex-direction: column;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header" aria-label="Site navigation">
+    <a class="brand" href="#top" aria-label="SumoGUIMac home">
+      <img src="Sources/SumoGUIMac/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-64.png" alt="">
+      <span>SumoGUIMac</span>
+    </a>
+    <nav class="nav">
+      <a href="#capabilities">Capabilities</a>
+      <a href="#status">Status</a>
+      <a href="#install">Build</a>
+      <a class="button" href="https://github.com/christofilojohn/SumoMacGUI">GitHub</a>
+    </nav>
+  </header>
+
+  <section class="hero" id="top">
+    <canvas id="traffic-scene" aria-hidden="true"></canvas>
+    <div class="hero-content">
+      <img class="hero-logo" src="Sources/SumoGUIMac/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon-512.png" alt="SumoGUIMac logo">
+      <p class="eyebrow">Native macOS SUMO viewer</p>
+      <h1>SumoGUIMac</h1>
+      <p class="hero-copy">
+        A lightweight SwiftUI + Metal alternative to <code>sumo-gui</code> for opening SUMO scenarios, running or attaching over TraCI, visualizing live traffic, and inspecting the objects that matter.
+      </p>
+      <div class="hero-actions">
+        <a class="button" href="https://github.com/christofilojohn/SumoMacGUI">View on GitHub</a>
+        <a class="button secondary" href="#install">Build locally</a>
+      </div>
+    </div>
+
+    <div class="status-strip" aria-label="Project status">
+      <div class="status-item">
+        <strong>macOS native</strong>
+        <span>SwiftUI shell, Metal renderer</span>
+      </div>
+      <div class="status-item">
+        <strong>TraCI ready</strong>
+        <span>Launch or attach to SUMO</span>
+      </div>
+      <div class="status-item">
+        <strong>Alpha scope</strong>
+        <span>Viewer and inspection workflows</span>
+      </div>
+      <div class="status-item">
+        <strong>MIT</strong>
+        <span>Open-source app, SUMO separate</span>
+      </div>
+    </div>
+  </section>
+
+  <main>
+    <section class="section" id="capabilities">
+      <div class="section-inner">
+        <div class="section-heading">
+          <h2>Built for everyday SUMO viewing on macOS.</h2>
+          <p>
+            SumoGUIMac focuses on the workflows researchers and engineers reach for first: open a scenario, watch traffic move, inspect objects, tune visualization, and attach to controller-driven runs.
+          </p>
+        </div>
+
+        <div class="capability-grid">
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Open normal SUMO files</h3>
+            <p>Load <code>.sumocfg</code> and <code>.net.xml</code> files, including additional polygons and POIs, without converting projects into a custom format.</p>
+          </article>
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Run or attach with TraCI</h3>
+            <p>Launch a local SUMO process or attach as a viewer client to an external run driven by another controller.</p>
+          </article>
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Render with Metal</h3>
+            <p>Draw lanes, junctions, live vehicles, selected routes, polygons, POIs, and background decals with a native GPU renderer.</p>
+          </article>
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Inspect live objects</h3>
+            <p>Select vehicles and edges, copy identifiers, follow vehicles, highlight routes, set breakpoints, and chart selected-object variables.</p>
+          </article>
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Mac-first controls</h3>
+            <p>Use familiar sidebars, inspector tabs, toolbar actions, keyboard shortcuts, Open Recent, and native dark-mode presentation.</p>
+          </article>
+          <article class="card">
+            <div class="accent"></div>
+            <h3>Research-friendly licensing</h3>
+            <p>The app is MIT licensed and interoperates with a separately installed Eclipse SUMO runtime over TraCI.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section product-band" aria-label="Product preview">
+      <div class="section-inner">
+        <div class="product-copy">
+          <h2>Less surface area than SUMO GUI. More native where it counts.</h2>
+          <p>
+            The alpha is intentionally narrow: a lightweight viewer and inspector, not a full replacement for netedit, 3D mode, detector tooling, or every advanced SUMO GUI panel.
+          </p>
+          <p>
+            That narrower scope is the point. It gives macOS users a clean way to work with SUMO scenarios when the upstream GUI feels out of place or unreliable on modern systems.
+          </p>
+        </div>
+
+        <div class="mock-window" aria-label="Stylized SumoGUIMac interface preview">
+          <div class="mock-top">
+            <span class="dot"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+          </div>
+          <div class="mock-body">
+            <div class="mock-sidebar">
+              <div class="row active"></div>
+              <div class="row medium"></div>
+              <div class="row"></div>
+              <div class="row short"></div>
+              <div class="row medium"></div>
+            </div>
+            <div class="mock-map">
+              <canvas id="preview-map" aria-hidden="true"></canvas>
+            </div>
+            <div class="mock-inspector">
+              <div class="row medium"></div>
+              <div class="row"></div>
+              <div class="row short"></div>
+              <div class="row active"></div>
+              <div class="row medium"></div>
+              <div class="row short"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="status">
+      <div class="section-inner">
+        <div class="section-heading">
+          <h2>Alpha-ready, with honest edges.</h2>
+          <p>
+            This is ready to present as a lightweight macOS alternative, while staying clear about the pieces that still belong to a later parity pass.
+          </p>
+        </div>
+
+        <div class="ship-grid">
+          <article class="ship-panel">
+            <h3>Working now</h3>
+            <ul class="check-list">
+              <li>Native app shell with sidebar, map, inspector, toolbar, menus, recent files, and shortcuts.</li>
+              <li>SUMO launch and external TraCI attach for live simulation playback.</li>
+              <li>Metal rendering for roads, junctions, vehicles, selections, routes, polygons, POIs, and decals.</li>
+              <li>Object selection, follow camera, breakpoints, route copy/select, and tracker charts.</li>
+              <li>Visualization settings with lane, vehicle, junction, palette, legend, and XML import/export support.</li>
+            </ul>
+          </article>
+          <article class="ship-panel pending">
+            <h3>Still missing</h3>
+            <ul class="check-list">
+              <li>Detached tracker windows and arbitrary TraCI variable picking.</li>
+              <li>Large-network profiling, one-hour stability runs, and top hot-path optimization.</li>
+              <li>External multi-client TraCI smoke testing with a controller and viewer order.</li>
+              <li>Developer ID signing, notarization, and release-channel polish.</li>
+              <li>Full SUMO GUI parity areas such as netedit, 3D, detector tooling, and deep person/container views.</li>
+            </ul>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section install" id="install">
+      <div class="section-inner">
+        <div class="section-heading">
+          <h2>Build the current alpha locally.</h2>
+          <p>
+            SumoGUIMac does not bundle Eclipse SUMO. Install SUMO separately, then build the native macOS app from source.
+          </p>
+        </div>
+
+        <div class="terminal" role="region" aria-label="Build commands">
+          <div class="terminal-head">
+            <span>Terminal</span>
+            <span>macOS 14+ / Xcode 15+</span>
+          </div>
+          <pre><code>git clone https://github.com/christofilojohn/SumoMacGUI.git
+cd SumoMacGUI
+swift test
+xcodebuild -project SumoGUIMac.xcodeproj \
+  -scheme SumoGUIMacApp \
+  -configuration Debug \
+  -destination platform=macOS build</code></pre>
+        </div>
+      </div>
+    </section>
+
+    <section class="section credit">
+      <div class="section-inner">
+        <div class="section-heading">
+          <h2>Built beside the SUMO ecosystem.</h2>
+          <p>
+            SumoGUIMac interoperates with a user-installed Eclipse SUMO runtime and is not affiliated with or endorsed by the SUMO maintainers. Please credit Eclipse SUMO, the open-source Simulation of Urban MObility project developed primarily by DLR's Institute of Transportation Systems, when using this work in research, demos, or derived projects.
+          </p>
+          <div class="hero-actions">
+            <a class="button secondary" href="https://eclipse.dev/sumo/">Eclipse SUMO</a>
+            <a class="button secondary" href="https://doi.org/10.5281/zenodo.18406080">SUMO DOI</a>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>SumoGUIMac</span>
+    <span>Native macOS SUMO viewer and TraCI inspector</span>
+  </footer>
+
+  <script>
+    const colors = {
+      lane: "rgba(218, 225, 226, 0.22)",
+      laneStrong: "rgba(43, 208, 198, 0.48)",
+      vehicleA: "#ff9b3d",
+      vehicleB: "#2bd0c6",
+      vehicleC: "#ff6b5f"
+    };
+
+    function createTrafficScene(canvas, options = {}) {
+      const context = canvas.getContext("2d");
+      const density = options.density || 1;
+      const speed = options.speed || 1;
+      const routes = [
+        [[-0.1, 0.26], [0.24, 0.22], [0.52, 0.32], [1.1, 0.22]],
+        [[-0.1, 0.72], [0.28, 0.64], [0.62, 0.68], [1.1, 0.58]],
+        [[0.12, -0.1], [0.20, 0.28], [0.34, 0.56], [0.32, 1.1]],
+        [[0.68, -0.1], [0.62, 0.26], [0.70, 0.60], [0.84, 1.1]],
+        [[-0.1, 0.48], [0.26, 0.44], [0.54, 0.50], [1.1, 0.42]]
+      ];
+      const vehicles = Array.from({ length: Math.round(24 * density) }, (_, index) => ({
+        route: index % routes.length,
+        offset: (index * 0.137) % 1,
+        color: [colors.vehicleA, colors.vehicleB, colors.vehicleC][index % 3],
+        size: 3.8 + (index % 4)
+      }));
+
+      function sizeCanvas() {
+        const rect = canvas.getBoundingClientRect();
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+        canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+      }
+
+      function pointOnRoute(route, progress, width, height) {
+        const scaled = route.map(([x, y]) => [x * width, y * height]);
+        const segments = [];
+        let total = 0;
+        for (let index = 0; index < scaled.length - 1; index += 1) {
+          const start = scaled[index];
+          const end = scaled[index + 1];
+          const length = Math.hypot(end[0] - start[0], end[1] - start[1]);
+          segments.push({ start, end, length });
+          total += length;
+        }
+        let distance = (progress % 1) * total;
+        for (const segment of segments) {
+          if (distance <= segment.length) {
+            const local = segment.length === 0 ? 0 : distance / segment.length;
+            return {
+              x: segment.start[0] + (segment.end[0] - segment.start[0]) * local,
+              y: segment.start[1] + (segment.end[1] - segment.start[1]) * local,
+              angle: Math.atan2(segment.end[1] - segment.start[1], segment.end[0] - segment.start[0])
+            };
+          }
+          distance -= segment.length;
+        }
+        const last = scaled[scaled.length - 1];
+        return { x: last[0], y: last[1], angle: 0 };
+      }
+
+      function draw(timestamp) {
+        const rect = canvas.getBoundingClientRect();
+        const width = rect.width;
+        const height = rect.height;
+        context.clearRect(0, 0, width, height);
+
+        context.lineCap = "round";
+        context.lineJoin = "round";
+        routes.forEach((route, index) => {
+          context.beginPath();
+          route.forEach(([x, y], pointIndex) => {
+            const px = x * width;
+            const py = y * height;
+            if (pointIndex === 0) {
+              context.moveTo(px, py);
+            } else {
+              context.lineTo(px, py);
+            }
+          });
+          context.strokeStyle = index === 1 ? colors.laneStrong : colors.lane;
+          context.lineWidth = index === 1 ? 7 : 4;
+          context.stroke();
+        });
+
+        vehicles.forEach((vehicle, index) => {
+          const progress = vehicle.offset + timestamp * 0.000035 * speed * (1 + (index % 5) * 0.08);
+          const route = routes[vehicle.route];
+          const pose = pointOnRoute(route, progress, width, height);
+          context.save();
+          context.translate(pose.x, pose.y);
+          context.rotate(pose.angle);
+          context.fillStyle = vehicle.color;
+          context.shadowColor = vehicle.color;
+          context.shadowBlur = 10;
+          context.fillRect(-vehicle.size * 1.8, -vehicle.size * 0.62, vehicle.size * 3.6, vehicle.size * 1.24);
+          context.restore();
+        });
+
+        requestAnimationFrame(draw);
+      }
+
+      sizeCanvas();
+      window.addEventListener("resize", sizeCanvas);
+      requestAnimationFrame(draw);
+    }
+
+    createTrafficScene(document.getElementById("traffic-scene"), { density: 1.2, speed: 1 });
+    createTrafficScene(document.getElementById("preview-map"), { density: 0.7, speed: 0.7 });
+  </script>
+</body>
+</html>
