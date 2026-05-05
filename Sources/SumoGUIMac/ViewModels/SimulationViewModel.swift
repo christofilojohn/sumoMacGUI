@@ -2402,10 +2402,10 @@ final class SimulationViewModel: ObservableObject {
         process.executableURL = netedit
         process.arguments = arguments
         process.currentDirectoryURL = workingDirectory
-        process.terminationHandler = { [weak self, weak process] _ in
-            Task { @MainActor in
-                guard let process else { return }
-                self?.externalToolProcesses.removeAll { $0 === process }
+        let processID = ObjectIdentifier(process)
+        process.terminationHandler = { [weak self, processID] _ in
+            Task { @MainActor [weak self, processID] in
+                self?.externalToolProcesses.removeAll { ObjectIdentifier($0) == processID }
             }
         }
 
