@@ -2,6 +2,40 @@ import XCTest
 @testable import SumoGUIMac
 
 final class NetworkRenderLODTests: XCTestCase {
+    func testRendererCoordinateSpaceFlipsUnflippedAppKitLocations() {
+        let viewLocation = CGPoint(x: 120, y: 80)
+
+        let rendererLocation = RendererCoordinateSpace.rendererLocation(
+            forViewLocation: viewLocation,
+            boundsHeight: 500,
+            isFlipped: false
+        )
+
+        XCTAssertEqual(rendererLocation.x, 120, accuracy: 0.001)
+        XCTAssertEqual(rendererLocation.y, 420, accuracy: 0.001)
+        XCTAssertEqual(
+            RendererCoordinateSpace.rendererLocation(forViewLocation: viewLocation, boundsHeight: 500, isFlipped: true),
+            viewLocation
+        )
+    }
+
+    func testViewTransformRoundTripsRendererCoordinates() {
+        let transform = ViewTransform(
+            netBounds: SIMD4<Float>(-100, -50, 300, 150),
+            viewSize: CGSize(width: 800, height: 600),
+            inset: 28,
+            center: SIMD2<Float>(100, 50),
+            pointsPerWorldUnit: 1.5,
+            rotationRadians: .pi / 7
+        )
+        let world = SIMD2<Float>(42, 84)
+        let screen = transform.point(world)
+        let roundTripped = transform.worldPoint(forScreenPoint: screen)
+
+        XCTAssertEqual(roundTripped.x, world.x, accuracy: 0.001)
+        XCTAssertEqual(roundTripped.y, world.y, accuracy: 0.001)
+    }
+
     func testLaneLODUsesHalfPixelThreshold() {
         XCTAssertFalse(RenderLOD.shouldRenderLane(worldWidth: 3.2, scale: 0.15624))
         XCTAssertTrue(RenderLOD.shouldRenderLane(worldWidth: 3.2, scale: 0.15625))

@@ -18,6 +18,22 @@ This project is built to be picked up by anyone.
 - **No comments explaining what code does.** Only why — non-obvious constraints, workarounds for specific bugs.
 - **Architectural choices go in [`docs/DECISIONS.md`](docs/DECISIONS.md).** Append-only.
 
+## SUMO and NetEdit license boundary
+
+SumoGUIMac is MIT-licensed and interoperates with Eclipse SUMO as a separate,
+user-installed runtime. Keep that boundary intact:
+
+- Do not copy, paste, translate, or mechanically port SUMO / NetEdit source code,
+  tests, UI resources, or generated implementation tables into this repository.
+- It is fine to implement fresh Swift code from public behavior: SUMO file
+  formats, TraCI protocol behavior, command-line behavior, documentation,
+  screenshots, and hands-on observation of the official apps.
+- Keep upstream SUMO clones under ignored scratch paths such as `.build/`.
+  Never commit upstream source snapshots unless a license review says to do so.
+- If a change truly needs copied or derived SUMO code, stop before committing it.
+  Preserve upstream notices, document the affected files, and decide explicitly
+  whether those files or the project need EPL-2.0 licensing.
+
 ## Code style
 
 - Swift 5.10, `swift-format` on default settings (config will land in Day 1).

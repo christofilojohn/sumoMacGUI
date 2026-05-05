@@ -12,6 +12,7 @@ struct NetworkView: NSViewRepresentable {
     let selectedVehicleID: String?
     let selectedEdgeIDs: Set<String>
     let selectedVehicleIDs: Set<String>
+    let selectedJunctionIDs: Set<String>
     let selectedRouteEdgeIDs: Set<String>
     let hoveredRouteEdgeIDs: Set<String>
     let laneColorMode: LaneColorMode
@@ -23,12 +24,25 @@ struct NetworkView: NSViewRepresentable {
     let showPOIs: Bool
     let backgroundDecal: BackgroundDecal?
     let palette: VisualizationPalette
+    let nativeEditTool: NativeNetworkEditTool?
+    let nativeEdgeGeometryHandles: [NativeEdgeGeometryHandle]
+    let nativeJunctionShapeHandles: [NativeJunctionShapeHandle]
     let screenshotExportRequest: SimulationViewModel.ScreenshotExportRequest?
     let onScreenshotExportCompleted: (UUID, Result<URL, Error>) -> Void
     let onVisibleWorldBoundsChanged: (SIMD4<Float>) -> Void
     let onVehiclePicked: (String?) -> Void
     let onVehicleHovered: (String?) -> Void
     let onEdgePicked: (String?) -> Void
+    let onNativeEditClick: (NativeNetworkCanvasClick) -> Void
+    let onNativeRubberBandSelection: (NativeNetworkRubberBandSelection) -> Void
+    let onNativeJunctionMoved: (String, SIMD2<Float>) -> Void
+    let onNativeJunctionMoveEnded: () -> Void
+    let onNativeEdgeGeometryPointMoved: (String, Int, SIMD2<Float>) -> Void
+    let onNativeEdgeGeometryPointMoveEnded: () -> Void
+    let onNativeJunctionShapePointMoved: (String, Int, SIMD2<Float>) -> Void
+    let onNativeJunctionShapePointMoveEnded: () -> Void
+    let onNativeDelete: () -> Void
+    let onNativeCancel: () -> Void
 
     func makeNSView(context: Context) -> NetworkMetalView {
         let view = NetworkMetalView()
@@ -37,6 +51,7 @@ struct NetworkView: NSViewRepresentable {
         view.selectedVehicleID = selectedVehicleID
         view.selectedEdgeIDs = selectedEdgeIDs
         view.selectedVehicleIDs = selectedVehicleIDs
+        view.selectedJunctionIDs = selectedJunctionIDs
         view.selectedRouteEdgeIDs = selectedRouteEdgeIDs
         view.hoveredRouteEdgeIDs = hoveredRouteEdgeIDs
         view.laneColorMode = laneColorMode
@@ -48,23 +63,42 @@ struct NetworkView: NSViewRepresentable {
         view.showPOIs = showPOIs
         view.backgroundDecal = backgroundDecal
         view.palette = palette
+        view.nativeEditTool = nativeEditTool
+        view.nativeEdgeGeometryHandles = nativeEdgeGeometryHandles
+        view.nativeJunctionShapeHandles = nativeJunctionShapeHandles
         view.onScreenshotExportCompleted = onScreenshotExportCompleted
         view.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         view.onVehiclePicked = onVehiclePicked
         view.onVehicleHovered = onVehicleHovered
         view.onEdgePicked = onEdgePicked
+        view.onNativeEditClick = onNativeEditClick
+        view.onNativeRubberBandSelection = onNativeRubberBandSelection
+        view.onNativeJunctionMoved = onNativeJunctionMoved
+        view.onNativeJunctionMoveEnded = onNativeJunctionMoveEnded
+        view.onNativeEdgeGeometryPointMoved = onNativeEdgeGeometryPointMoved
+        view.onNativeEdgeGeometryPointMoveEnded = onNativeEdgeGeometryPointMoveEnded
+        view.onNativeJunctionShapePointMoved = onNativeJunctionShapePointMoved
+        view.onNativeJunctionShapePointMoveEnded = onNativeJunctionShapePointMoveEnded
+        view.onNativeDelete = onNativeDelete
+        view.onNativeCancel = onNativeCancel
         view.screenshotExportRequest = screenshotExportRequest
         return view
     }
 
     func updateNSView(_ nsView: NetworkMetalView, context: Context) {
         nsView.viewport = viewport
-        nsView.graph = graph
+        let wasNativeEditing = nsView.nativeEditTool != nil
+        if nativeEditTool != nil, wasNativeEditing {
+            nsView.replaceGraphPreservingViewport(graph)
+        } else {
+            nsView.graph = graph
+        }
         nsView.simulationState = simulationState
         nsView.selectedEdgeID = selectedEdgeID
         nsView.selectedVehicleID = selectedVehicleID
         nsView.selectedEdgeIDs = selectedEdgeIDs
         nsView.selectedVehicleIDs = selectedVehicleIDs
+        nsView.selectedJunctionIDs = selectedJunctionIDs
         nsView.selectedRouteEdgeIDs = selectedRouteEdgeIDs
         nsView.hoveredRouteEdgeIDs = hoveredRouteEdgeIDs
         nsView.laneColorMode = laneColorMode
@@ -76,11 +110,24 @@ struct NetworkView: NSViewRepresentable {
         nsView.showPOIs = showPOIs
         nsView.backgroundDecal = backgroundDecal
         nsView.palette = palette
+        nsView.nativeEditTool = nativeEditTool
+        nsView.nativeEdgeGeometryHandles = nativeEdgeGeometryHandles
+        nsView.nativeJunctionShapeHandles = nativeJunctionShapeHandles
         nsView.onScreenshotExportCompleted = onScreenshotExportCompleted
         nsView.onVisibleWorldBoundsChanged = onVisibleWorldBoundsChanged
         nsView.onVehiclePicked = onVehiclePicked
         nsView.onVehicleHovered = onVehicleHovered
         nsView.onEdgePicked = onEdgePicked
+        nsView.onNativeEditClick = onNativeEditClick
+        nsView.onNativeRubberBandSelection = onNativeRubberBandSelection
+        nsView.onNativeJunctionMoved = onNativeJunctionMoved
+        nsView.onNativeJunctionMoveEnded = onNativeJunctionMoveEnded
+        nsView.onNativeEdgeGeometryPointMoved = onNativeEdgeGeometryPointMoved
+        nsView.onNativeEdgeGeometryPointMoveEnded = onNativeEdgeGeometryPointMoveEnded
+        nsView.onNativeJunctionShapePointMoved = onNativeJunctionShapePointMoved
+        nsView.onNativeJunctionShapePointMoveEnded = onNativeJunctionShapePointMoveEnded
+        nsView.onNativeDelete = onNativeDelete
+        nsView.onNativeCancel = onNativeCancel
         nsView.screenshotExportRequest = screenshotExportRequest
     }
 }
@@ -89,8 +136,47 @@ private final class PassthroughMTKView: MTKView {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 }
 
+private final class RubberBandOverlayView: NSView {
+    var rubberBandRect: CGRect? {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    var handlePoints: [CGPoint] = [] {
+        didSet {
+            needsDisplay = true
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        for point in handlePoints {
+            let rect = CGRect(x: point.x - 4, y: point.y - 4, width: 8, height: 8)
+            let path = NSBezierPath(ovalIn: rect)
+            NSColor.windowBackgroundColor.withAlphaComponent(0.92).setFill()
+            path.fill()
+            NSColor.controlAccentColor.withAlphaComponent(0.95).setStroke()
+            path.lineWidth = 1.5
+            path.stroke()
+        }
+        guard let rect = rubberBandRect, rect.width > 1, rect.height > 1 else { return }
+        let path = NSBezierPath(rect: rect)
+        NSColor.controlAccentColor.withAlphaComponent(0.16).setFill()
+        path.fill()
+        NSColor.controlAccentColor.withAlphaComponent(0.78).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
 final class NetworkMetalView: NSView, MTKViewDelegate {
     private let metalView = PassthroughMTKView()
+    private let rubberBandOverlayView = RubberBandOverlayView()
     private var device: MTLDevice?
     private var commandQueue: MTLCommandQueue?
     private var backgroundPipeline: MTLRenderPipelineState?
@@ -116,6 +202,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var lastDragLocation: CGPoint?
     private var mouseDownLocation: CGPoint?
     private var didDragBeyondClickSlop = false
+    private var nativeDragJunctionID: String?
+    private var nativeDragEdgeGeometryHandle: NativeEdgeGeometryHandle?
+    private var nativeDragJunctionShapeHandle: NativeJunctionShapeHandle?
+    private var nativeRubberBandStart: CGPoint?
+    private var nativeRubberBandCurrent: CGPoint?
+    private var nativeRubberBandExtendsSelection = false
     private var lastReportedVisibleBounds: SIMD4<Float>?
     private var vehicleAnimationTimer: Timer?
     private var vehicleAnimationStartTime: TimeInterval = 0
@@ -123,6 +215,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var vehicleAnimationSource: [String: VehicleRenderSample] = [:]
     private var vehicleAnimationTarget: [String: VehicleRenderSample] = [:]
     private var magnifyEventMonitor: Any?
+    private var preservesViewportForGraphReplacement = false
     private var handledScreenshotRequestID: UUID?
     private var lastHoveredVehicleID: String?
     var onScreenshotExportCompleted: ((UUID, Result<URL, Error>) -> Void)?
@@ -130,11 +223,42 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     var onVehiclePicked: ((String?) -> Void)?
     var onVehicleHovered: ((String?) -> Void)?
     var onEdgePicked: ((String?) -> Void)?
+    var onNativeEditClick: ((NativeNetworkCanvasClick) -> Void)?
+    var onNativeRubberBandSelection: ((NativeNetworkRubberBandSelection) -> Void)?
+    var onNativeJunctionMoved: ((String, SIMD2<Float>) -> Void)?
+    var onNativeJunctionMoveEnded: (() -> Void)?
+    var onNativeEdgeGeometryPointMoved: ((String, Int, SIMD2<Float>) -> Void)?
+    var onNativeEdgeGeometryPointMoveEnded: (() -> Void)?
+    var onNativeJunctionShapePointMoved: ((String, Int, SIMD2<Float>) -> Void)?
+    var onNativeJunctionShapePointMoveEnded: (() -> Void)?
+    var onNativeDelete: (() -> Void)?
+    var onNativeCancel: (() -> Void)?
+    var nativeEdgeGeometryHandles: [NativeEdgeGeometryHandle] = [] {
+        didSet {
+            guard nativeEdgeGeometryHandles != oldValue else { return }
+            updateNativeHandleOverlay()
+        }
+    }
+    var nativeJunctionShapeHandles: [NativeJunctionShapeHandle] = [] {
+        didSet {
+            guard nativeJunctionShapeHandles != oldValue else { return }
+            updateNativeHandleOverlay()
+        }
+    }
+    var nativeEditTool: NativeNetworkEditTool? {
+        didSet {
+            guard nativeEditTool != oldValue else { return }
+            updateCursorForCurrentMode()
+            updateNativeHandleOverlay()
+        }
+    }
 
     var graph: NetGraph? {
         didSet {
             if graph !== oldValue {
-                viewport?.requestFit()
+                if !preservesViewportForGraphReplacement {
+                    viewport?.requestFit()
+                }
                 lastLaneLODScale = nil
                 lastVehicleLODScale = nil
                 rebuildBackgroundBuffer()
@@ -145,6 +269,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             }
             rebuildPaths()
         }
+    }
+
+    func replaceGraphPreservingViewport(_ graph: NetGraph?) {
+        preservesViewportForGraphReplacement = true
+        self.graph = graph
+        preservesViewportForGraphReplacement = false
     }
 
     var simulationState = SimulationState() {
@@ -180,6 +310,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         didSet {
             guard selectedVehicleIDs != oldValue else { return }
             updateVehicleBuffer(samples: currentVehicleSamplesForDisplay())
+        }
+    }
+
+    var selectedJunctionIDs: Set<String> = [] {
+        didSet {
+            guard selectedJunctionIDs != oldValue else { return }
+            rebuildJunctionBuffer()
+            metalView.setNeedsDisplay(bounds)
         }
     }
 
@@ -320,16 +458,70 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     override func layout() {
         super.layout()
         metalView.frame = bounds
+        rubberBandOverlayView.frame = bounds
         rebuildPaths()
+    }
+
+    private func rendererLocation(for event: NSEvent) -> CGPoint {
+        let viewLocation = convert(event.locationInWindow, from: nil)
+        return RendererCoordinateSpace.rendererLocation(
+            forViewLocation: viewLocation,
+            boundsHeight: bounds.height,
+            isFlipped: isFlipped
+        )
+    }
+
+    private func overlayRect(fromRendererStart start: CGPoint, toRendererEnd end: CGPoint) -> CGRect {
+        CGRect(
+            x: min(start.x, end.x),
+            y: min(start.y, end.y),
+            width: abs(end.x - start.x),
+            height: abs(end.y - start.y)
+        )
+    }
+
+    private func normalizedWorldBounds(from start: SIMD2<Float>, to end: SIMD2<Float>) -> SIMD4<Float> {
+        SIMD4(
+            min(start.x, end.x),
+            min(start.y, end.y),
+            max(start.x, end.x),
+            max(start.y, end.y)
+        )
     }
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        NSCursor.closedHand.set()
-        let location = convert(event.locationInWindow, from: nil)
+        if nativeEditTool == nil {
+            NSCursor.closedHand.set()
+        }
+        let location = rendererLocation(for: event)
         lastDragLocation = location
         mouseDownLocation = location
         didDragBeyondClickSlop = false
+        if nativeEditTool == .select {
+            nativeDragJunctionShapeHandle = nearestNativeJunctionShapeHandle(at: location)
+            nativeDragEdgeGeometryHandle = nativeDragJunctionShapeHandle == nil ? nearestNativeEdgeGeometryHandle(at: location) : nil
+            nativeDragJunctionID = nativeDragJunctionShapeHandle == nil && nativeDragEdgeGeometryHandle == nil
+                ? nearestJunctionID(at: location)
+                : nil
+            if nativeDragJunctionShapeHandle == nil, nativeDragEdgeGeometryHandle == nil, nativeDragJunctionID == nil {
+                nativeRubberBandStart = location
+                nativeRubberBandCurrent = nil
+                nativeRubberBandExtendsSelection = event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command)
+            } else {
+                nativeRubberBandStart = nil
+                nativeRubberBandCurrent = nil
+                nativeRubberBandExtendsSelection = false
+            }
+        } else {
+            nativeDragJunctionID = nil
+            nativeDragEdgeGeometryHandle = nil
+            nativeDragJunctionShapeHandle = nil
+            nativeRubberBandStart = nil
+            nativeRubberBandCurrent = nil
+            nativeRubberBandExtendsSelection = false
+        }
+        rubberBandOverlayView.rubberBandRect = nil
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -340,8 +532,53 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         else {
             return
         }
-        let location = convert(event.locationInWindow, from: nil)
-        let screenDelta = CGPoint(x: location.x - lastDragLocation.x, y: lastDragLocation.y - location.y)
+        let location = rendererLocation(for: event)
+        if let nativeDragJunctionID {
+            onNativeJunctionMoved?(nativeDragJunctionID, transform.worldPoint(forScreenPoint: location))
+            self.lastDragLocation = location
+            if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
+                didDragBeyondClickSlop = true
+                updateHoveredVehicle(nil)
+            }
+            return
+        }
+        if let nativeDragJunctionShapeHandle {
+            onNativeJunctionShapePointMoved?(
+                nativeDragJunctionShapeHandle.junctionID,
+                nativeDragJunctionShapeHandle.pointIndex,
+                transform.worldPoint(forScreenPoint: location)
+            )
+            self.lastDragLocation = location
+            if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
+                didDragBeyondClickSlop = true
+                updateHoveredVehicle(nil)
+            }
+            return
+        }
+        if let nativeDragEdgeGeometryHandle {
+            onNativeEdgeGeometryPointMoved?(
+                nativeDragEdgeGeometryHandle.edgeID,
+                nativeDragEdgeGeometryHandle.pointIndex,
+                transform.worldPoint(forScreenPoint: location)
+            )
+            self.lastDragLocation = location
+            if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
+                didDragBeyondClickSlop = true
+                updateHoveredVehicle(nil)
+            }
+            return
+        }
+        if let nativeRubberBandStart, nativeEditTool == .select, event.modifierFlags.contains(.option) == false {
+            nativeRubberBandCurrent = location
+            self.lastDragLocation = location
+            if screenDistance(from: nativeRubberBandStart, to: location) > 3 {
+                didDragBeyondClickSlop = true
+                rubberBandOverlayView.rubberBandRect = overlayRect(fromRendererStart: nativeRubberBandStart, toRendererEnd: location)
+                updateHoveredVehicle(nil)
+            }
+            return
+        }
+        let screenDelta = CGPoint(x: location.x - lastDragLocation.x, y: location.y - lastDragLocation.y)
         viewport.pan(worldDelta: transform.worldDelta(forScreenDelta: screenDelta))
         self.lastDragLocation = location
         if let mouseDownLocation, screenDistance(from: mouseDownLocation, to: location) > 3 {
@@ -351,8 +588,24 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     }
 
     override func mouseExited(with event: NSEvent) {
+        if nativeDragJunctionID != nil {
+            onNativeJunctionMoveEnded?()
+        }
+        if nativeDragEdgeGeometryHandle != nil {
+            onNativeEdgeGeometryPointMoveEnded?()
+        }
+        if nativeDragJunctionShapeHandle != nil {
+            onNativeJunctionShapePointMoveEnded?()
+        }
         lastDragLocation = nil
         mouseDownLocation = nil
+        nativeDragJunctionID = nil
+        nativeDragEdgeGeometryHandle = nil
+        nativeDragJunctionShapeHandle = nil
+        nativeRubberBandStart = nil
+        nativeRubberBandCurrent = nil
+        nativeRubberBandExtendsSelection = false
+        rubberBandOverlayView.rubberBandRect = nil
         updateHoveredVehicle(nil)
     }
 
@@ -365,13 +618,13 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     }
 
     override func mouseMoved(with event: NSEvent) {
-        NSCursor.openHand.set()
-        let location = convert(event.locationInWindow, from: nil)
+        updateCursorForCurrentMode()
+        let location = rendererLocation(for: event)
         updateHoveredVehicle(nearestVehicleID(at: location))
     }
 
     override func mouseEntered(with event: NSEvent) {
-        NSCursor.openHand.set()
+        updateCursorForCurrentMode()
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -380,7 +633,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             return
         }
 
-        let location = convert(event.locationInWindow, from: nil)
+        let location = rendererLocation(for: event)
         let zoomModifierActive = event.modifierFlags.contains(.command) || event.modifierFlags.contains(.option)
         updateHoveredVehicle(nil)
         if event.hasPreciseScrollingDeltas, !zoomModifierActive {
@@ -398,25 +651,69 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             super.smartMagnify(with: event)
             return
         }
-        let location = convert(event.locationInWindow, from: nil)
+        let location = rendererLocation(for: event)
         let anchor = transform.worldPoint(forScreenPoint: location)
         viewport.zoom(by: 1.8, anchorWorld: anchor)
     }
 
     override func mouseUp(with event: NSEvent) {
-        let location = convert(event.locationInWindow, from: nil)
-        if event.clickCount == 2, let viewport, let transform = currentTransform() {
+        let location = rendererLocation(for: event)
+        if let nativeRubberBandStart,
+           let nativeRubberBandCurrent,
+           didDragBeyondClickSlop,
+           let transform = currentTransform()
+        {
+            let startWorld = transform.worldPoint(forScreenPoint: nativeRubberBandStart)
+            let endWorld = transform.worldPoint(forScreenPoint: nativeRubberBandCurrent)
+            onNativeRubberBandSelection?(NativeNetworkRubberBandSelection(
+                worldBounds: normalizedWorldBounds(from: startWorld, to: endWorld),
+                extendsSelection: nativeRubberBandExtendsSelection
+            ))
+        } else if event.clickCount == 2, let viewport, let transform = currentTransform() {
             let anchor = transform.worldPoint(forScreenPoint: location)
             let factor: Float = event.modifierFlags.contains(.option) ? 0.55 : 1.8
             viewport.zoom(by: factor, anchorWorld: anchor)
         } else if event.clickCount == 1, !didDragBeyondClickSlop {
-            pickObject(at: location)
+            if handleNativeEditClick(at: location, event: event) == false {
+                pickObject(at: location)
+            }
         }
         updateHoveredVehicle(nearestVehicleID(at: location))
+        if nativeDragJunctionID != nil {
+            onNativeJunctionMoveEnded?()
+        }
+        if nativeDragEdgeGeometryHandle != nil {
+            onNativeEdgeGeometryPointMoveEnded?()
+        }
+        if nativeDragJunctionShapeHandle != nil {
+            onNativeJunctionShapePointMoveEnded?()
+        }
         lastDragLocation = nil
         mouseDownLocation = nil
+        nativeDragJunctionID = nil
+        nativeDragEdgeGeometryHandle = nil
+        nativeDragJunctionShapeHandle = nil
+        nativeRubberBandStart = nil
+        nativeRubberBandCurrent = nil
+        nativeRubberBandExtendsSelection = false
+        rubberBandOverlayView.rubberBandRect = nil
         didDragBeyondClickSlop = false
-        NSCursor.openHand.set()
+        updateCursorForCurrentMode()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard nativeEditTool != nil else {
+            super.keyDown(with: event)
+            return
+        }
+        switch event.keyCode {
+        case 51, 117:
+            onNativeDelete?()
+        case 53:
+            onNativeCancel?()
+        default:
+            super.keyDown(with: event)
+        }
     }
 
     func draw(in view: MTKView) {
@@ -574,6 +871,10 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         metalView.isPaused = true
         metalView.autoresizingMask = [.width, .height]
         addSubview(metalView)
+        rubberBandOverlayView.autoresizingMask = [.width, .height]
+        rubberBandOverlayView.wantsLayer = true
+        rubberBandOverlayView.layer?.backgroundColor = NSColor.clear.cgColor
+        addSubview(rubberBandOverlayView)
 
         let tracking = NSTrackingArea(
             rect: .zero,
@@ -597,13 +898,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 return event
             }
             let locationInView = self.convert(event.locationInWindow, from: nil)
+            let locationInRenderer = self.rendererLocation(for: event)
             guard self.bounds.contains(locationInView),
                   let viewport = self.viewport,
                   let transform = self.currentTransform()
             else {
                 return event
             }
-            let anchor = transform.worldPoint(forScreenPoint: locationInView)
+            let anchor = transform.worldPoint(forScreenPoint: locationInRenderer)
             let factor = Float(exp(Double(event.magnification) * 3.5))
             viewport.zoom(by: factor, anchorWorld: anchor)
             return nil
@@ -612,13 +914,29 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
     private func rebuildPaths() {
         guard let graph, bounds.width > 10, bounds.height > 10 else {
+            rubberBandOverlayView.handlePoints = []
             return
         }
 
         let transform = currentTransform(for: graph)
         reportVisibleBounds(transform: transform)
         refreshLODDependentBuffers(transform: transform)
+        updateNativeHandleOverlay(transform: transform)
         metalView.setNeedsDisplay(bounds)
+    }
+
+    private func updateNativeHandleOverlay(transform: ViewTransform? = nil) {
+        guard nativeEditTool == .select else {
+            rubberBandOverlayView.handlePoints = []
+            return
+        }
+        guard let transform = transform ?? currentTransform() else {
+            rubberBandOverlayView.handlePoints = []
+            return
+        }
+        rubberBandOverlayView.handlePoints =
+            nativeJunctionShapeHandles.map { transform.point($0.position) } +
+            nativeEdgeGeometryHandles.map { transform.point($0.position) }
     }
 
     private func exportScreenshot(_ request: SimulationViewModel.ScreenshotExportRequest) {
@@ -819,6 +1137,10 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     }
 
     private func junctionColor(_ junction: Junction) -> SIMD4<Float> {
+        if selectedJunctionIDs.contains(junction.id) {
+            let color = selectedLaneColor()
+            return SIMD4(color.x, color.y, color.z, 1)
+        }
         switch junctionColorMode {
         case .type:
             return junctionTypeColor(type: junction.type)
@@ -1322,6 +1644,66 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         return bestID
     }
 
+    private func nearestJunctionID(at screenLocation: CGPoint) -> String? {
+        guard let graph, let transform = currentTransform() else { return nil }
+        let pickThreshold: CGFloat = 14
+        var bestID: String?
+        var bestDistance = pickThreshold
+        for junction in graph.junctions {
+            let point = transform.point(junction.position)
+            let distance = screenDistance(from: screenLocation, to: point)
+            if distance <= bestDistance {
+                bestID = junction.id
+                bestDistance = distance
+            }
+        }
+        return bestID
+    }
+
+    private func nearestNativeEdgeGeometryHandle(at screenLocation: CGPoint) -> NativeEdgeGeometryHandle? {
+        guard let transform = currentTransform() else { return nil }
+        let pickThreshold: CGFloat = 12
+        var bestHandle: NativeEdgeGeometryHandle?
+        var bestDistance = pickThreshold
+        for handle in nativeEdgeGeometryHandles {
+            let point = transform.point(handle.position)
+            let distance = screenDistance(from: screenLocation, to: point)
+            if distance <= bestDistance {
+                bestHandle = handle
+                bestDistance = distance
+            }
+        }
+        return bestHandle
+    }
+
+    private func nearestNativeJunctionShapeHandle(at screenLocation: CGPoint) -> NativeJunctionShapeHandle? {
+        guard let transform = currentTransform() else { return nil }
+        let pickThreshold: CGFloat = 12
+        var bestHandle: NativeJunctionShapeHandle?
+        var bestDistance = pickThreshold
+        for handle in nativeJunctionShapeHandles {
+            let point = transform.point(handle.position)
+            let distance = screenDistance(from: screenLocation, to: point)
+            if distance <= bestDistance {
+                bestHandle = handle
+                bestDistance = distance
+            }
+        }
+        return bestHandle
+    }
+
+    private func handleNativeEditClick(at location: CGPoint, event: NSEvent) -> Bool {
+        guard nativeEditTool != nil, let transform = currentTransform() else { return false }
+        let click = NativeNetworkCanvasClick(
+            worldPosition: transform.worldPoint(forScreenPoint: location),
+            junctionID: nearestJunctionID(at: location),
+            edgeID: nearestEdgeID(at: location),
+            extendsSelection: event.modifierFlags.contains(.shift) || event.modifierFlags.contains(.command)
+        )
+        onNativeEditClick?(click)
+        return true
+    }
+
     private func pickObject(at location: CGPoint) {
         if let vehicleID = nearestVehicleID(at: location) {
             onVehiclePicked?(vehicleID)
@@ -1337,6 +1719,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         guard lastHoveredVehicleID != vehicleID else { return }
         lastHoveredVehicleID = vehicleID
         onVehicleHovered?(vehicleID)
+    }
+
+    private func updateCursorForCurrentMode() {
+        if nativeEditTool == nil {
+            NSCursor.openHand.set()
+        } else {
+            NSCursor.crosshair.set()
+        }
     }
 
     private func reportVisibleBounds(transform: ViewTransform) {
@@ -1636,7 +2026,16 @@ private struct LaneViewportUniforms {
     }
 }
 
-private struct ViewTransform {
+enum RendererCoordinateSpace {
+    static func rendererLocation(forViewLocation viewLocation: CGPoint, boundsHeight: CGFloat, isFlipped: Bool) -> CGPoint {
+        if isFlipped {
+            return viewLocation
+        }
+        return CGPoint(x: viewLocation.x, y: boundsHeight - viewLocation.y)
+    }
+}
+
+struct ViewTransform {
     let scale: Float
     let rotationRadians: Float
     private let offsetX: Float

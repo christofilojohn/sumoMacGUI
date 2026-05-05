@@ -42,6 +42,30 @@ public struct Lane: Sendable {
     public var shapeOffset: Int32
     public var shapeCount: Int32
     public var bounds: SIMD4<Float>   // xmin ymin xmax ymax
+
+    public init(
+        id: String,
+        edgeIndex: Int32,
+        index: Int16,
+        speed: Float,
+        length: Float,
+        width: Float,
+        allowsAll: Bool,
+        shapeOffset: Int32,
+        shapeCount: Int32,
+        bounds: SIMD4<Float>
+    ) {
+        self.id = id
+        self.edgeIndex = edgeIndex
+        self.index = index
+        self.speed = speed
+        self.length = length
+        self.width = width
+        self.allowsAll = allowsAll
+        self.shapeOffset = shapeOffset
+        self.shapeCount = shapeCount
+        self.bounds = bounds
+    }
 }
 
 public struct Edge: Sendable {
@@ -52,6 +76,24 @@ public struct Edge: Sendable {
     public var priority: Int16
     public var laneRange: Range<Int32>
     public var bounds: SIMD4<Float>
+
+    public init(
+        id: String,
+        fromJunction: String,
+        toJunction: String,
+        function: EdgeFunction,
+        priority: Int16,
+        laneRange: Range<Int32>,
+        bounds: SIMD4<Float>
+    ) {
+        self.id = id
+        self.fromJunction = fromJunction
+        self.toJunction = toJunction
+        self.function = function
+        self.priority = priority
+        self.laneRange = laneRange
+        self.bounds = bounds
+    }
 }
 
 public enum EdgeFunction: UInt8, Sendable {
@@ -71,6 +113,26 @@ public struct Junction: Sendable {
     public var bounds: SIMD4<Float>
     public var incomingLanes: [String]
     public var internalLanes: [String]
+
+    public init(
+        id: String,
+        type: String,
+        position: SIMD2<Float>,
+        shapeOffset: Int32,
+        shapeCount: Int32,
+        bounds: SIMD4<Float>,
+        incomingLanes: [String],
+        internalLanes: [String]
+    ) {
+        self.id = id
+        self.type = type
+        self.position = position
+        self.shapeOffset = shapeOffset
+        self.shapeCount = shapeCount
+        self.bounds = bounds
+        self.incomingLanes = incomingLanes
+        self.internalLanes = internalLanes
+    }
 }
 
 public struct Connection: Sendable {

@@ -171,6 +171,22 @@ final class SimulationViewModel: ObservableObject {
     @Published var backgroundOpacity: Float = 0.65
     @Published var visualizationPalette = VisualizationPalette()
     @Published var isVisualizationSettingsPresented = false
+    @Published private(set) var nativeEditor = NativeNetworkEditorState()
+    @Published private(set) var nativeEditorUndoCount = 0
+    @Published private(set) var nativeEditorRedoCount = 0
+    @Published private(set) var nativeSnapToGrid = false
+    @Published private(set) var nativeGridSize: Float = 10
+    @Published var nativeEditTool: NativeNetworkEditTool = .select {
+        didSet {
+            guard nativeEditTool != oldValue else { return }
+            if nativeEditTool != .edge {
+                nativeEditor.pendingEdgeStartJunctionID = nil
+            }
+            if nativeEditor.isEnabled {
+                runtimeMessage = nativeEditTool.helpText
+            }
+        }
+    }
 
     private let initialOpenURL: URL?
     private let userDefaults: UserDefaults
@@ -180,6 +196,12 @@ final class SimulationViewModel: ObservableObject {
     private var viewportSubscriptionTask: Task<Void, Never>?
     private var vehicleUpdateModeTask: Task<Void, Never>?
     private var hoverRouteTask: Task<Void, Never>?
+    private var externalToolProcesses: [Process] = []
+    private var nativeEditorUndoStack: [NativeNetworkEditorState] = []
+    private var nativeEditorRedoStack: [NativeNetworkEditorState] = []
+    private var nativeMoveUndoJunctionID: String?
+    private var nativeMoveUndoGeometryPoint: NativeEdgeGeometryHandle?
+    private var nativeMoveUndoJunctionShapePoint: NativeJunctionShapeHandle?
     private var latestViewportBounds: SIMD4<Float>?
     private var spatialIndexes: SpatialIndexes?
     private var lastPlaybackWallTime: TimeInterval?
@@ -191,6 +213,7 @@ final class SimulationViewModel: ObservableObject {
     private static let maxRecentDocumentCount = 8
     private static let maxTrackerSampleCount = 240
     private static let maxTrackerValueSampleCount = 2_000
+    private static let maxNativeEditorHistoryCount = 120
 
     init(initialOpenURL: URL? = nil, userDefaults: UserDefaults = .standard) {
         self.initialOpenURL = initialOpenURL
@@ -227,6 +250,61 @@ final class SimulationViewModel: ObservableObject {
 
     var canFollowSelectedVehicle: Bool {
         selectedVehicleID != nil
+    }
+
+    var nativeNetworkEditingEnabled: Bool {
+        nativeEditor.isEnabled
+    }
+
+    var nativeNetworkCanExport: Bool {
+        nativeEditor.isEnabled && nativeEditor.junctions.isEmpty == false
+    }
+
+    var nativeEditorCanUndo: Bool {
+        nativeEditor.isEnabled && nativeEditorUndoCount > 0
+    }
+
+    var nativeEditorCanRedo: Bool {
+        nativeEditor.isEnabled && nativeEditorRedoCount > 0
+    }
+
+    var nativeSnapSummary: String {
+        nativeSnapToGrid ? "Snap \(formattedNativeGridSize)m" : "Free placement"
+    }
+
+    var nativeEditStatus: String {
+        let suffix = nativeSnapToGrid ? ", snap \(formattedNativeGridSize)m" : ""
+        if let pending = nativeEditor.pendingEdgeStartJunctionID {
+            return "\(nativeEditor.junctions.count) junctions, \(nativeEditor.edges.count) edges, edge from \(pending)\(suffix)"
+        }
+        return "\(nativeEditor.junctions.count) junctions, \(nativeEditor.edges.count) edges\(suffix)"
+    }
+
+    private var formattedNativeGridSize: String {
+        String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), nativeGridSize)
+    }
+
+    var selectedNativeJunction: NativeNetworkJunction? {
+        guard let id = nativeEditor.selectedJunctionID else { return nil }
+        return nativeEditor.junction(id: id)
+    }
+
+    var selectedNativeEdge: NativeNetworkEdge? {
+        guard let id = nativeEditor.selectedEdgeID else { return nil }
+        return nativeEditor.edge(id: id)
+    }
+
+    var nativeEdgeGeometryHandles: [NativeEdgeGeometryHandle] {
+        guard nativeEditor.isEnabled else { return [] }
+        return nativeEditor.edgeGeometryHandles()
+    }
+
+    var nativeJunctionShapeHandles: [NativeJunctionShapeHandle] {
+        guard nativeEditor.isEnabled else { return [] }
+        let focusedIDs = nativeEditor.selectedJunctionIDs.isEmpty
+            ? Set(nativeEditor.selectedJunctionID.map { [$0] } ?? [])
+            : nativeEditor.selectedJunctionIDs
+        return nativeEditor.junctionShapeHandles(for: focusedIDs)
     }
 
     var hasSelection: Bool {
@@ -423,6 +501,578 @@ final class SimulationViewModel: ObservableObject {
             Task { @MainActor in
                 self?.presentAttachSettings(for: url)
             }
+        }
+    }
+
+    func presentNetEditOpenPanel() {
+        let panel = NSOpenPanel()
+        panel.message = "Choose the .sumocfg or .net.xml to edit in SUMO NetEdit."
+        panel.prompt = "Edit"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "sumocfg"),
+            UTType(filenameExtension: "xml"),
+        ].compactMap { $0 }
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.openInNetEdit(url)
+            }
+        }
+    }
+
+    func openCurrentDocumentInNetEdit() {
+        guard let sourceURL else {
+            presentNetEditOpenPanel()
+            return
+        }
+        openInNetEdit(sourceURL)
+    }
+
+    func createNewNetworkInNetEdit() {
+        launchNetEdit(arguments: ["--new-network"], workingDirectory: nil, successMessage: "Opened a new network in SUMO NetEdit.")
+    }
+
+    func beginNativeNetworkEditing() async {
+        await shutdownSession()
+        resetEditingDocumentState()
+        nativeEditor = NativeNetworkEditorState(isEnabled: true)
+        resetNativeEditorHistory()
+        nativeEditTool = .junction
+        rebuildNativeNetworkGraph()
+        sourceURL = nil
+        loadState = .ready
+        runtimeMessage = nativeEditTool.helpText
+    }
+
+    func beginNativeNetworkEditingFromCurrentOrNew() async {
+        guard let graph else {
+            await beginNativeNetworkEditing()
+            return
+        }
+        await shutdownSession()
+        resetEditingDocumentState()
+        nativeEditor = NativeNetworkEditorState(importing: graph)
+        resetNativeEditorHistory()
+        nativeEditTool = nativeEditor.junctions.isEmpty ? .junction : .select
+        rebuildNativeNetworkGraph()
+        loadState = .ready
+        runtimeMessage = "Converted visible network to a simplified native editing draft."
+    }
+
+    func finishNativeNetworkEditing() {
+        guard nativeEditor.isEnabled else { return }
+        nativeEditor.isEnabled = false
+        nativeEditor.pendingEdgeStartJunctionID = nil
+        runtimeMessage = "Native editing paused."
+    }
+
+    func setNativeEditTool(_ tool: NativeNetworkEditTool) {
+        nativeEditTool = tool
+    }
+
+    func handleNativeNetworkCanvasClick(_ click: NativeNetworkCanvasClick) {
+        guard nativeEditor.isEnabled else { return }
+        switch nativeEditTool {
+        case .select:
+            if let junctionID = click.junctionID {
+                selectNativeJunction(junctionID, extending: click.extendsSelection)
+            } else if let edgeID = click.edgeID {
+                selectNativeEdge(edgeID, extending: click.extendsSelection)
+            } else {
+                guard click.extendsSelection == false else {
+                    runtimeMessage = "Selection unchanged."
+                    return
+                }
+                clearNativeEditorSelection()
+                runtimeMessage = "Selection cleared."
+            }
+        case .junction:
+            var addedID: String?
+            if commitNativeEditorMutation({
+                let junction = $0.addJunction(at: snappedNativePosition(click.worldPosition))
+                addedID = junction.id
+                return true
+            }) {
+                runtimeMessage = "Added junction \(addedID ?? "junction")."
+            }
+        case .edge:
+            let junctionID = click.junctionID ?? nativeEditor.previewNextJunctionID
+            if let startID = nativeEditor.pendingEdgeStartJunctionID {
+                guard startID != junctionID else {
+                    nativeEditor.selectedJunctionID = junctionID
+                    runtimeMessage = "Choose another junction to finish the edge."
+                    return
+                }
+                guard nativeEditor.hasEdge(from: startID, to: junctionID) == false else {
+                    runtimeMessage = "That edge already exists in the native draft."
+                    return
+                }
+                var addedEdgeID: String?
+                let committed = commitNativeEditorMutation({
+                    let destinationID: String
+                    if let existingID = click.junctionID {
+                        destinationID = existingID
+                    } else {
+                        destinationID = $0.addJunction(at: snappedNativePosition(click.worldPosition)).id
+                    }
+                    guard let edge = $0.addEdge(from: startID, to: destinationID) else {
+                        return false
+                    }
+                    $0.pendingEdgeStartJunctionID = nil
+                    addedEdgeID = edge.id
+                    return true
+                })
+                if committed {
+                    runtimeMessage = "Added edge \(addedEdgeID ?? "edge")."
+                }
+            } else {
+                if click.junctionID == nil {
+                    var addedJunctionID: String?
+                    if commitNativeEditorMutation({
+                        let junction = $0.addJunction(at: snappedNativePosition(click.worldPosition))
+                        $0.pendingEdgeStartJunctionID = junction.id
+                        addedJunctionID = junction.id
+                        return true
+                    }) {
+                        runtimeMessage = "Started edge from \(addedJunctionID ?? "junction")."
+                    }
+                } else if let junctionID = click.junctionID {
+                    nativeEditor.selectJunction(junctionID)
+                    nativeEditor.pendingEdgeStartJunctionID = junctionID
+                    selectedEdgeID = nil
+                    syncNativeSelectionToViewerSelection()
+                    rebuildNativeNetworkGraph()
+                    runtimeMessage = "Started edge from \(junctionID)."
+                }
+            }
+        }
+    }
+
+    func selectNativeJunction(_ id: String, extending: Bool = false) {
+        guard nativeEditor.isEnabled, nativeEditor.junction(id: id) != nil else { return }
+        nativeEditor.selectJunction(id, extending: extending)
+        syncNativeSelectionToViewerSelection()
+        runtimeMessage = nativeSelectionMessage(focusedLabel: "junction \(id)")
+    }
+
+    func selectNativeEdge(_ id: String, extending: Bool = false) {
+        guard nativeEditor.isEnabled, nativeEditor.edge(id: id) != nil else { return }
+        nativeEditor.selectEdge(id, extending: extending)
+        syncNativeSelectionToViewerSelection()
+        runtimeMessage = nativeSelectionMessage(focusedLabel: "edge \(id)")
+    }
+
+    func selectNativeObjects(_ selection: NativeNetworkRubberBandSelection) {
+        guard nativeEditor.isEnabled else { return }
+        let summary = nativeEditor.selectObjects(in: selection.worldBounds, extending: selection.extendsSelection)
+        syncNativeSelectionToViewerSelection()
+        runtimeMessage = "Selected \(summary.junctionCount) junction\(summary.junctionCount == 1 ? "" : "s") and \(summary.edgeCount) edge\(summary.edgeCount == 1 ? "" : "s")."
+    }
+
+    func moveNativeJunction(id: String, to position: SIMD2<Float>) {
+        guard nativeEditor.isEnabled else { return }
+        guard let junction = nativeEditor.junction(id: id) else { return }
+        let targetPosition = snappedNativePosition(position)
+        guard junction.position != targetPosition else { return }
+        if nativeMoveUndoJunctionID != id {
+            recordNativeEditorUndoSnapshot(nativeEditor)
+            nativeMoveUndoJunctionID = id
+        }
+        guard nativeEditor.moveJunction(id, to: targetPosition) else { return }
+        nativeEditor.focusJunction(id, preservingSelection: true)
+        syncNativeSelectionToViewerSelection()
+        rebuildNativeNetworkGraph()
+        runtimeMessage = "Moved junction \(id)."
+    }
+
+    func finishNativeJunctionMoveGesture() {
+        nativeMoveUndoJunctionID = nil
+    }
+
+    func moveNativeEdgeGeometryPoint(edgeID: String, pointIndex: Int, to position: SIMD2<Float>) {
+        guard nativeEditor.isEnabled else { return }
+        guard nativeEditor.edge(id: edgeID)?.geometryPoints.indices.contains(pointIndex) == true else { return }
+        let targetPosition = snappedNativePosition(position)
+        let handle = NativeEdgeGeometryHandle(edgeID: edgeID, pointIndex: pointIndex, position: targetPosition)
+        if nativeMoveUndoGeometryPoint?.edgeID != edgeID || nativeMoveUndoGeometryPoint?.pointIndex != pointIndex {
+            recordNativeEditorUndoSnapshot(nativeEditor)
+            nativeMoveUndoGeometryPoint = handle
+        }
+        guard nativeEditor.moveEdgeGeometryPoint(edgeID: edgeID, pointIndex: pointIndex, to: targetPosition) else { return }
+        nativeEditor.focusEdge(edgeID, preservingSelection: true)
+        syncNativeSelectionToViewerSelection()
+        rebuildNativeNetworkGraph()
+        runtimeMessage = "Moved edge \(edgeID) geometry point."
+    }
+
+    func finishNativeEdgeGeometryPointMoveGesture() {
+        nativeMoveUndoGeometryPoint = nil
+    }
+
+    func moveNativeJunctionShapePoint(junctionID: String, pointIndex: Int, to position: SIMD2<Float>) {
+        guard nativeEditor.isEnabled else { return }
+        guard nativeEditor.junction(id: junctionID)?.shapePoints.indices.contains(pointIndex) == true else { return }
+        let targetPosition = snappedNativePosition(position)
+        let handle = NativeJunctionShapeHandle(junctionID: junctionID, pointIndex: pointIndex, position: targetPosition)
+        if nativeMoveUndoJunctionShapePoint?.junctionID != junctionID ||
+            nativeMoveUndoJunctionShapePoint?.pointIndex != pointIndex
+        {
+            recordNativeEditorUndoSnapshot(nativeEditor)
+            nativeMoveUndoJunctionShapePoint = handle
+        }
+        guard nativeEditor.moveJunctionShapePoint(junctionID: junctionID, pointIndex: pointIndex, to: targetPosition) else { return }
+        nativeEditor.focusJunction(junctionID, preservingSelection: true)
+        syncNativeSelectionToViewerSelection()
+        rebuildNativeNetworkGraph()
+        runtimeMessage = "Moved junction \(junctionID) shape point."
+    }
+
+    func finishNativeJunctionShapePointMoveGesture() {
+        nativeMoveUndoJunctionShapePoint = nil
+    }
+
+    func setSelectedNativeJunctionType(_ type: String) {
+        guard let id = nativeEditor.selectedJunctionID else { return }
+        let cleanType = type.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanType.isEmpty == false else { return }
+        guard commitNativeEditorMutation({ $0.updateJunction(id, type: cleanType) }) else { return }
+        runtimeMessage = "Updated junction \(id)."
+    }
+
+    func setSelectedNativeJunctionID(_ newID: String) {
+        guard let id = nativeEditor.selectedJunctionID else { return }
+        switch validatedNativeObjectID(newID, currentID: id) {
+        case .success(let cleanID):
+            guard cleanID != id else { return }
+            guard commitNativeEditorMutation({ $0.renameJunction(id, to: cleanID) }) else {
+                runtimeMessage = "Junction ID \(cleanID) is already in use."
+                return
+            }
+            runtimeMessage = "Renamed junction \(id) to \(cleanID)."
+        case .failure(let message):
+            runtimeMessage = message
+        }
+    }
+
+    func setSelectedNativeJunctionPosition(axis: Int, value: Float) {
+        guard let junction = selectedNativeJunction, value.isFinite else { return }
+        var position = junction.position
+        if axis == 0 {
+            position.x = value
+        } else {
+            position.y = value
+        }
+        guard commitNativeEditorMutation({ state in
+            state.moveJunction(junction.id, to: position)
+        }) else { return }
+        runtimeMessage = "Moved junction \(junction.id)."
+    }
+
+    func setSelectedNativeJunctionRadius(_ radius: Float) {
+        guard let id = nativeEditor.selectedJunctionID, radius.isFinite, radius > 0 else { return }
+        guard commitNativeEditorMutation({ $0.updateJunction(id, radius: max(0.5, min(radius, 1_000))) }) else { return }
+        runtimeMessage = "Updated junction \(id)."
+    }
+
+    func customizeSelectedNativeJunctionShape() {
+        guard let id = nativeEditor.selectedJunctionID else {
+            runtimeMessage = "Select a native junction first."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.customizeJunctionShape(id) }) else {
+            runtimeMessage = "Junction \(id) already has a custom shape."
+            return
+        }
+        runtimeMessage = "Enabled custom shape editing for junction \(id)."
+    }
+
+    func addShapePointToSelectedNativeJunction() {
+        guard let id = nativeEditor.selectedJunctionID else {
+            runtimeMessage = "Select a native junction first."
+            return
+        }
+        var pointIndex: Int?
+        guard commitNativeEditorMutation({ state in
+            pointIndex = state.addShapePoint(toJunction: id)
+            return pointIndex != nil
+        }) else {
+            runtimeMessage = "Could not add a shape point to junction \(id)."
+            return
+        }
+        runtimeMessage = "Added shape point \(pointIndex.map { $0 + 1 } ?? 1) to junction \(id)."
+    }
+
+    func removeLastShapePointFromSelectedNativeJunction() {
+        guard let id = nativeEditor.selectedJunctionID else {
+            runtimeMessage = "Select a native junction first."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.removeLastShapePoint(fromJunction: id) }) else {
+            runtimeMessage = "Junction \(id) needs at least three shape points."
+            return
+        }
+        runtimeMessage = "Removed the last shape point from junction \(id)."
+    }
+
+    func resetSelectedNativeJunctionShape() {
+        guard let id = nativeEditor.selectedJunctionID else {
+            runtimeMessage = "Select a native junction first."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.resetJunctionShape(id) }) else {
+            runtimeMessage = "Junction \(id) is already using radius shape."
+            return
+        }
+        runtimeMessage = "Reset junction \(id) to radius shape."
+    }
+
+    func setSelectedNativeEdgePriority(_ priority: Int16) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, priority: priority) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeLaneCount(_ laneCount: Int) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, laneCount: max(1, min(laneCount, 12))) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeSpeed(_ speed: Float) {
+        guard let id = nativeEditor.selectedEdgeID, speed.isFinite, speed > 0 else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, speed: speed) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeID(_ newID: String) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        switch validatedNativeObjectID(newID, currentID: id) {
+        case .success(let cleanID):
+            guard cleanID != id else { return }
+            guard commitNativeEditorMutation({ $0.renameEdge(id, to: cleanID) }) else {
+                runtimeMessage = "Edge ID \(cleanID) is already in use."
+                return
+            }
+            runtimeMessage = "Renamed edge \(id) to \(cleanID)."
+        case .failure(let message):
+            runtimeMessage = message
+        }
+    }
+
+    func setSelectedNativeEdgeLaneWidth(_ width: Float) {
+        guard let id = nativeEditor.selectedEdgeID, width.isFinite, width > 0 else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, laneWidth: max(0.5, min(width, 12))) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeFromJunction(_ junctionID: String) {
+        guard let edge = selectedNativeEdge else { return }
+        let cleanID = junctionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanID != edge.toJunctionID else {
+            runtimeMessage = "Edge endpoints must be different."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.updateEdge(edge.id, fromJunctionID: cleanID) }) else {
+            runtimeMessage = "Junction \(cleanID) is not in the native draft."
+            return
+        }
+        runtimeMessage = "Updated edge \(edge.id) start junction."
+    }
+
+    func setSelectedNativeEdgeToJunction(_ junctionID: String) {
+        guard let edge = selectedNativeEdge else { return }
+        let cleanID = junctionID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanID != edge.fromJunctionID else {
+            runtimeMessage = "Edge endpoints must be different."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.updateEdge(edge.id, toJunctionID: cleanID) }) else {
+            runtimeMessage = "Junction \(cleanID) is not in the native draft."
+            return
+        }
+        runtimeMessage = "Updated edge \(edge.id) end junction."
+    }
+
+    func setSelectedNativeEdgeSpreadType(_ spreadType: String) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        let cleanSpreadType = spreadType.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanSpreadType.isEmpty == false else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, spreadType: cleanSpreadType) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeAllow(_ allow: String) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, allow: allow.trimmingCharacters(in: .whitespacesAndNewlines)) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func setSelectedNativeEdgeDisallow(_ disallow: String) {
+        guard let id = nativeEditor.selectedEdgeID else { return }
+        guard commitNativeEditorMutation({ $0.updateEdge(id, disallow: disallow.trimmingCharacters(in: .whitespacesAndNewlines)) }) else { return }
+        runtimeMessage = "Updated edge \(id)."
+    }
+
+    func addGeometryPointToSelectedNativeEdge() {
+        guard let id = nativeEditor.selectedEdgeID else {
+            runtimeMessage = "Select a native edge first."
+            return
+        }
+        var pointIndex: Int?
+        guard commitNativeEditorMutation({ state in
+            pointIndex = state.addGeometryPoint(toEdge: id)
+            return pointIndex != nil
+        }) else {
+            runtimeMessage = "Could not add a geometry point to edge \(id)."
+            return
+        }
+        runtimeMessage = "Added geometry point \(pointIndex.map { $0 + 1 } ?? 1) to edge \(id)."
+    }
+
+    func removeLastGeometryPointFromSelectedNativeEdge() {
+        guard let id = nativeEditor.selectedEdgeID else {
+            runtimeMessage = "Select a native edge first."
+            return
+        }
+        guard commitNativeEditorMutation({ $0.removeLastGeometryPoint(fromEdge: id) }) else {
+            runtimeMessage = "Edge \(id) has no geometry points to remove."
+            return
+        }
+        runtimeMessage = "Removed the last geometry point from edge \(id)."
+    }
+
+    func duplicateSelectedNativeEdge() {
+        guard let id = nativeEditor.selectedEdgeID else {
+            runtimeMessage = "Select a native edge first."
+            return
+        }
+        var duplicateID: String?
+        guard commitNativeEditorMutation({ state in
+            guard let edge = state.duplicateEdge(id) else { return false }
+            duplicateID = edge.id
+            return true
+        }) else {
+            runtimeMessage = "Could not duplicate edge \(id)."
+            return
+        }
+        runtimeMessage = "Duplicated edge \(id) as \(duplicateID ?? "new edge")."
+    }
+
+    func reverseSelectedNativeEdge() {
+        guard let id = nativeEditor.selectedEdgeID else {
+            runtimeMessage = "Select a native edge first."
+            return
+        }
+        var reverseID: String?
+        guard commitNativeEditorMutation({ state in
+            guard let edge = state.reverseEdge(id) else { return false }
+            reverseID = edge.id
+            return true
+        }) else {
+            runtimeMessage = "Could not create a reverse edge for \(id)."
+            return
+        }
+        runtimeMessage = "Created reverse edge \(reverseID ?? "edge") from \(id)."
+    }
+
+    func deleteSelectedNativeObject() {
+        guard nativeEditor.isEnabled else { return }
+        var removed: NativeNetworkSelectionRemoval?
+        guard commitNativeEditorMutation({ state in
+            removed = state.removeSelectedObjects()
+            return removed != nil
+        }) else {
+            runtimeMessage = "Select a native junction or edge first."
+            return
+        }
+        let junctionCount = removed?.junctionCount ?? 0
+        let edgeCount = removed?.edgeCount ?? 0
+        runtimeMessage = "Deleted \(junctionCount) junction\(junctionCount == 1 ? "" : "s") and \(edgeCount) edge\(edgeCount == 1 ? "" : "s")."
+    }
+
+    func clearNativePendingEdge() {
+        nativeEditor.pendingEdgeStartJunctionID = nil
+        runtimeMessage = "Cancelled native edge creation."
+    }
+
+    func setNativeSnapToGrid(_ enabled: Bool) {
+        nativeSnapToGrid = enabled
+        nativeMoveUndoJunctionID = nil
+        nativeMoveUndoGeometryPoint = nil
+        nativeMoveUndoJunctionShapePoint = nil
+        runtimeMessage = enabled ? "Grid snapping enabled at \(formattedNativeGridSize)m." : "Grid snapping disabled."
+    }
+
+    func setNativeGridSize(_ size: Float) {
+        guard size.isFinite, size > 0 else { return }
+        nativeGridSize = max(0.25, min(size, 1_000))
+        runtimeMessage = "Native editor grid set to \(formattedNativeGridSize)m."
+    }
+
+    func undoNativeEditorChange() {
+        guard nativeEditorCanUndo, let previous = nativeEditorUndoStack.popLast() else { return }
+        nativeEditorRedoStack.append(nativeEditor)
+        nativeEditor = previous
+        nativeMoveUndoJunctionID = nil
+        nativeMoveUndoGeometryPoint = nil
+        nativeMoveUndoJunctionShapePoint = nil
+        syncNativeSelectionToViewerSelection()
+        updateNativeEditorHistoryCounts()
+        rebuildNativeNetworkGraph()
+        runtimeMessage = "Undid native editor change."
+    }
+
+    func redoNativeEditorChange() {
+        guard nativeEditorCanRedo, let next = nativeEditorRedoStack.popLast() else { return }
+        nativeEditorUndoStack.append(nativeEditor)
+        nativeEditor = next
+        nativeMoveUndoJunctionID = nil
+        nativeMoveUndoGeometryPoint = nil
+        nativeMoveUndoJunctionShapePoint = nil
+        syncNativeSelectionToViewerSelection()
+        updateNativeEditorHistoryCounts()
+        rebuildNativeNetworkGraph()
+        runtimeMessage = "Redid native editor change."
+    }
+
+    func presentNativeNetworkExportPanel() {
+        guard nativeNetworkCanExport else {
+            runtimeMessage = "Add at least one junction before exporting."
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = "Export Native Network"
+        panel.prompt = "Export"
+        panel.allowedContentTypes = [UTType.xml]
+        panel.nameFieldStringValue = "native-network.net.xml"
+        panel.begin { [weak self] response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { @MainActor in
+                self?.exportNativeNetwork(to: url)
+            }
+        }
+    }
+
+    func exportNativeNetwork(to outputNetURL: URL) {
+        guard nativeNetworkCanExport else {
+            runtimeMessage = "Add at least one junction before exporting."
+            return
+        }
+        let plan = NativeNetworkExportPlan(outputNetURL: outputNetURL)
+        do {
+            try NativeNetworkSUMOWriter.writeSourceFiles(for: nativeEditor, plan: plan)
+            if let netconvert = SumoLauncher.locateTool(named: "netconvert") {
+                try runNetconvert(netconvert, plan: plan)
+                sourceURL = plan.netURL
+                rememberRecentDocument(plan.netURL)
+                runtimeMessage = "Exported native network to \(plan.netURL.lastPathComponent)."
+            } else {
+                runtimeMessage = "Wrote \(plan.nodeURL.lastPathComponent) and \(plan.edgeURL.lastPathComponent). Install netconvert to compile the .net.xml."
+            }
+        } catch {
+            runtimeMessage = "Native network export failed: \(error.localizedDescription)"
         }
     }
 
@@ -626,6 +1276,9 @@ final class SimulationViewModel: ObservableObject {
         selectedEdgeID = nil
         isFollowingSelectedVehicle = false
         isRotatingWithSelectedVehicle = false
+        nativeEditor = NativeNetworkEditorState()
+        resetNativeEditorHistory()
+        nativeEditTool = .select
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
@@ -685,6 +1338,9 @@ final class SimulationViewModel: ObservableObject {
         selectedEdgeID = nil
         isFollowingSelectedVehicle = false
         isRotatingWithSelectedVehicle = false
+        nativeEditor = NativeNetworkEditorState()
+        resetNativeEditorHistory()
+        nativeEditTool = .select
         latestViewportBounds = nil
         spatialIndexes = nil
         do {
@@ -1582,6 +2238,187 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
+    private func resetEditingDocumentState() {
+        liveState = SimulationState()
+        runtimeMessage = nil
+        breakpoints = []
+        trackerSamples = []
+        trackerValueSamples = []
+        resetPlaybackSpeed()
+        selectedVehicleID = nil
+        selectedEdgeIDs = []
+        selectedVehicleIDs = []
+        selectedRouteEdgeIDs = []
+        clearHoverRoutePreview()
+        vehicleRouteCache = [:]
+        vehicleRouteOrderCache = [:]
+        laneOccupancyByID = [:]
+        selectedEdgeID = nil
+        isFollowingSelectedVehicle = false
+        isRotatingWithSelectedVehicle = false
+        latestViewportBounds = nil
+        spatialIndexes = nil
+    }
+
+    @discardableResult
+    private func commitNativeEditorMutation(_ mutate: (inout NativeNetworkEditorState) -> Bool) -> Bool {
+        guard nativeEditor.isEnabled else { return false }
+        let previous = nativeEditor
+        var next = nativeEditor
+        guard mutate(&next), next != previous else { return false }
+        recordNativeEditorUndoSnapshot(previous)
+        nativeEditor = next
+        nativeMoveUndoJunctionID = nil
+        nativeMoveUndoGeometryPoint = nil
+        nativeMoveUndoJunctionShapePoint = nil
+        syncNativeSelectionToViewerSelection()
+        rebuildNativeNetworkGraph()
+        return true
+    }
+
+    private func recordNativeEditorUndoSnapshot(_ snapshot: NativeNetworkEditorState) {
+        guard snapshot.isEnabled else { return }
+        if nativeEditorUndoStack.last == snapshot {
+            return
+        }
+        nativeEditorUndoStack.append(snapshot)
+        if nativeEditorUndoStack.count > Self.maxNativeEditorHistoryCount {
+            nativeEditorUndoStack.removeFirst(nativeEditorUndoStack.count - Self.maxNativeEditorHistoryCount)
+        }
+        nativeEditorRedoStack.removeAll()
+        updateNativeEditorHistoryCounts()
+    }
+
+    private func resetNativeEditorHistory() {
+        nativeEditorUndoStack = []
+        nativeEditorRedoStack = []
+        nativeMoveUndoJunctionID = nil
+        nativeMoveUndoGeometryPoint = nil
+        nativeMoveUndoJunctionShapePoint = nil
+        updateNativeEditorHistoryCounts()
+    }
+
+    private func updateNativeEditorHistoryCounts() {
+        nativeEditorUndoCount = nativeEditorUndoStack.count
+        nativeEditorRedoCount = nativeEditorRedoStack.count
+    }
+
+    private func validatedNativeObjectID(_ value: String, currentID: String) -> NativeEditorIDValidationResult {
+        let cleanID = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard cleanID.isEmpty == false else {
+            return .failure("IDs cannot be empty.")
+        }
+        guard cleanID.unicodeScalars.allSatisfy({ CharacterSet.whitespacesAndNewlines.contains($0) == false }) else {
+            return .failure("IDs cannot contain whitespace.")
+        }
+        guard cleanID != currentID else {
+            return .success(cleanID)
+        }
+        return .success(cleanID)
+    }
+
+    private func snappedNativePosition(_ position: SIMD2<Float>) -> SIMD2<Float> {
+        guard nativeSnapToGrid, nativeGridSize.isFinite, nativeGridSize > 0 else {
+            return position
+        }
+        return SIMD2(
+            (position.x / nativeGridSize).rounded() * nativeGridSize,
+            (position.y / nativeGridSize).rounded() * nativeGridSize
+        )
+    }
+
+    private func rebuildNativeNetworkGraph() {
+        guard nativeEditor.isEnabled else { return }
+        let editedGraph = NativeNetworkGraphBuilder.makeGraph(from: nativeEditor)
+        graph = editedGraph
+        spatialIndexes = editedGraph.makeSpatialIndexes()
+    }
+
+    private func clearNativeEditorSelection() {
+        nativeEditor.clearSelection()
+        syncNativeSelectionToViewerSelection()
+    }
+
+    private func syncNativeSelectionToViewerSelection() {
+        guard nativeEditor.isEnabled else { return }
+        selectedEdgeID = nativeEditor.selectedEdgeID
+        selectedEdgeIDs = nativeEditor.selectedEdgeIDs
+        selectedVehicleID = nil
+        selectedVehicleIDs = []
+        selectedRouteEdgeIDs = []
+        isFollowingSelectedVehicle = false
+        isRotatingWithSelectedVehicle = false
+    }
+
+    private func nativeSelectionMessage(focusedLabel: String) -> String {
+        let count = nativeEditor.selectedObjectCount
+        if count > 1 {
+            return "Selected \(focusedLabel) (\(count) objects selected)."
+        }
+        if count == 0 {
+            return "Selection cleared."
+        }
+        return "Selected \(focusedLabel)."
+    }
+
+    private func runNetconvert(_ executableURL: URL, plan: NativeNetworkExportPlan) throws {
+        let process = Process()
+        process.executableURL = executableURL
+        process.arguments = [
+            "--node-files", plan.nodeURL.path,
+            "--edge-files", plan.edgeURL.path,
+            "--output-file", plan.netURL.path,
+        ]
+        process.currentDirectoryURL = plan.netURL.deletingLastPathComponent()
+        let stderr = Pipe()
+        process.standardError = stderr
+        process.standardOutput = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let data = stderr.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw RuntimeError(message?.isEmpty == false ? message! : "netconvert exited with status \(process.terminationStatus).")
+        }
+        try NativeNetworkSUMOWriter.writeConfigFile(plan: plan)
+    }
+
+    private func openInNetEdit(_ url: URL) {
+        let plan = NetEditLaunchPlan(url: url)
+        launchNetEdit(
+            arguments: plan.arguments,
+            workingDirectory: url.deletingLastPathComponent(),
+            successMessage: "Opened \(url.lastPathComponent) in SUMO NetEdit."
+        )
+    }
+
+    private func launchNetEdit(arguments: [String], workingDirectory: URL?, successMessage: String) {
+        guard let netedit = SumoLauncher.locateTool(named: "netedit") else {
+            runtimeMessage = "SUMO NetEdit not found. Install SUMO or add netedit to PATH."
+            return
+        }
+
+        let process = Process()
+        process.executableURL = netedit
+        process.arguments = arguments
+        process.currentDirectoryURL = workingDirectory
+        process.terminationHandler = { [weak self, weak process] _ in
+            Task { @MainActor in
+                guard let process else { return }
+                self?.externalToolProcesses.removeAll { $0 === process }
+            }
+        }
+
+        do {
+            externalToolProcesses.append(process)
+            try process.run()
+            runtimeMessage = successMessage
+        } catch {
+            externalToolProcesses.removeAll { $0 === process }
+            runtimeMessage = "SUMO NetEdit launch failed: \(error.localizedDescription)"
+        }
+    }
+
     private func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
@@ -1648,6 +2485,1152 @@ final class SimulationViewModel: ObservableObject {
 
     private func boundsAreValid(_ bounds: SIMD4<Float>) -> Bool {
         bounds.x.isFinite && bounds.y.isFinite && bounds.z.isFinite && bounds.w.isFinite
+    }
+}
+
+enum NativeNetworkEditTool: String, CaseIterable, Identifiable {
+    case select
+    case junction
+    case edge
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .select:
+            return "Select"
+        case .junction:
+            return "Junction"
+        case .edge:
+            return "Edge"
+        }
+    }
+
+    var systemImage: String {
+        switch self {
+        case .select:
+            return "cursorarrow"
+        case .junction:
+            return "smallcircle.filled.circle"
+        case .edge:
+            return "point.topleft.down.curvedto.point.bottomright.up"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .select:
+            return "Native editor select mode."
+        case .junction:
+            return "Click the canvas to add a junction."
+        case .edge:
+            return "Click two junctions to add an edge."
+        }
+    }
+}
+
+struct NativeNetworkCanvasClick: Equatable {
+    let worldPosition: SIMD2<Float>
+    let junctionID: String?
+    let edgeID: String?
+    let extendsSelection: Bool
+
+    init(
+        worldPosition: SIMD2<Float>,
+        junctionID: String?,
+        edgeID: String?,
+        extendsSelection: Bool = false
+    ) {
+        self.worldPosition = worldPosition
+        self.junctionID = junctionID
+        self.edgeID = edgeID
+        self.extendsSelection = extendsSelection
+    }
+}
+
+struct NativeNetworkRubberBandSelection: Equatable {
+    let worldBounds: SIMD4<Float>
+    let extendsSelection: Bool
+}
+
+struct NativeEdgeGeometryHandle: Equatable, Identifiable {
+    var edgeID: String
+    var pointIndex: Int
+    var position: SIMD2<Float>
+
+    var id: String {
+        "\(edgeID):\(pointIndex)"
+    }
+}
+
+struct NativeJunctionShapeHandle: Equatable, Identifiable {
+    var junctionID: String
+    var pointIndex: Int
+    var position: SIMD2<Float>
+
+    var id: String {
+        "\(junctionID):shape:\(pointIndex)"
+    }
+}
+
+enum NativeEditorIDValidationResult: Equatable {
+    case success(String)
+    case failure(String)
+}
+
+struct NativeNetworkJunction: Equatable, Identifiable {
+    var id: String
+    var position: SIMD2<Float>
+    var type: String = "priority"
+    var radius: Float = Self.defaultRadius
+    var shapePoints: [SIMD2<Float>] = []
+
+    static let defaultRadius: Float = 4
+
+    var hasCustomShape: Bool {
+        shapePoints.count >= 3
+    }
+}
+
+struct NativeNetworkEdge: Equatable, Identifiable {
+    var id: String
+    var fromJunctionID: String
+    var toJunctionID: String
+    var geometryPoints: [SIMD2<Float>] = []
+    var priority: Int16 = 1
+    var laneCount: Int = 1
+    var speed: Float = 13.89
+    var laneWidth: Float = 3.2
+    var spreadType: String = "right"
+    var allow: String = ""
+    var disallow: String = ""
+}
+
+struct NativeNetworkSelectionRemoval: Equatable {
+    let junctionCount: Int
+    let edgeCount: Int
+}
+
+struct NativeNetworkSelectionSummary: Equatable {
+    let junctionCount: Int
+    let edgeCount: Int
+}
+
+struct NativeNetworkEditorState: Equatable {
+    var isEnabled = false
+    var junctions: [NativeNetworkJunction] = []
+    var edges: [NativeNetworkEdge] = []
+    var selectedJunctionID: String?
+    var selectedEdgeID: String?
+    var selectedJunctionIDs: Set<String> = []
+    var selectedEdgeIDs: Set<String> = []
+    var pendingEdgeStartJunctionID: String?
+    private var nextJunctionNumber = 0
+    private var nextEdgeNumber = 0
+
+    init(isEnabled: Bool = false) {
+        self.isEnabled = isEnabled
+    }
+
+    var previewNextJunctionID: String {
+        var candidate = nextJunctionNumber
+        while junction(id: "J\(candidate)") != nil {
+            candidate += 1
+        }
+        return "J\(candidate)"
+    }
+
+    var selectedObjectCount: Int {
+        selectedJunctionIDs.count + selectedEdgeIDs.count
+    }
+
+    init(importing graph: NetGraph) {
+        isEnabled = true
+        junctions = graph.junctions
+            .filter { !$0.id.hasPrefix(":") }
+            .map { junction in
+                let shape = Array(graph.junctionShape(junction))
+                return NativeNetworkJunction(
+                    id: junction.id,
+                    position: junction.position,
+                    type: junction.type.isEmpty ? "priority" : junction.type,
+                    radius: Self.estimatedJunctionRadius(center: junction.position, shape: shape),
+                    shapePoints: shape.count >= 3 ? shape : []
+                )
+            }
+
+        let junctionIDs = Set(junctions.map(\.id))
+        edges = graph.edges.compactMap { edge in
+            guard edge.function == .normal, junctionIDs.contains(edge.fromJunction), junctionIDs.contains(edge.toJunction) else {
+                return nil
+            }
+            let lanes = edge.laneRange.count
+            let laneWidth = edge.laneRange.compactMap { laneIndex -> Float? in
+                let index = Int(laneIndex)
+                guard graph.lanes.indices.contains(index) else { return nil }
+                let width = graph.lanes[index].width
+                return width.isFinite && width > 0 ? width : nil
+            }.first ?? 3.2
+            return NativeNetworkEdge(
+                id: edge.id,
+                fromJunctionID: edge.fromJunction,
+                toJunctionID: edge.toJunction,
+                priority: edge.priority,
+                laneCount: max(lanes, 1),
+                speed: 13.89,
+                laneWidth: laneWidth
+            )
+        }
+        nextJunctionNumber = nextNumber(after: junctions.map(\.id), prefix: "J")
+        nextEdgeNumber = nextNumber(after: edges.map(\.id), prefix: "E")
+    }
+
+    func junction(id: String) -> NativeNetworkJunction? {
+        junctions.first { $0.id == id }
+    }
+
+    func edge(id: String) -> NativeNetworkEdge? {
+        edges.first { $0.id == id }
+    }
+
+    func hasEdge(from startID: String, to endID: String) -> Bool {
+        edges.contains { $0.fromJunctionID == startID && $0.toJunctionID == endID }
+    }
+
+    func edgeGeometryHandles() -> [NativeEdgeGeometryHandle] {
+        edges.flatMap { edge in
+            edge.geometryPoints.enumerated().map { index, point in
+                NativeEdgeGeometryHandle(edgeID: edge.id, pointIndex: index, position: point)
+            }
+        }
+    }
+
+    func junctionShapeHandles(for junctionIDs: Set<String>) -> [NativeJunctionShapeHandle] {
+        guard junctionIDs.isEmpty == false else { return [] }
+        return junctions
+            .filter { junctionIDs.contains($0.id) && $0.hasCustomShape }
+            .flatMap { junction in
+                junction.shapePoints.enumerated().map { index, point in
+                    NativeJunctionShapeHandle(junctionID: junction.id, pointIndex: index, position: point)
+                }
+            }
+    }
+
+    func edgePath(_ edge: NativeNetworkEdge) -> [SIMD2<Float>] {
+        guard
+            let from = junction(id: edge.fromJunctionID),
+            let to = junction(id: edge.toJunctionID)
+        else {
+            return edge.geometryPoints
+        }
+        return [from.position] + edge.geometryPoints + [to.position]
+    }
+
+    func junctionShape(for junction: NativeNetworkJunction) -> [SIMD2<Float>] {
+        guard junction.hasCustomShape == false else {
+            return junction.shapePoints
+        }
+        return Self.defaultJunctionShape(center: junction.position, radius: junction.radius)
+    }
+
+    func objects(in bounds: SIMD4<Float>) -> NativeNetworkSelectionSummary {
+        let normalized = Self.normalizedBounds(bounds)
+        let junctionCount = junctions.filter { junctionIntersectsBounds($0, bounds: normalized) }.count
+        let edgeCount = edges.filter { edgeIntersectsBounds($0, bounds: normalized) }.count
+        return NativeNetworkSelectionSummary(junctionCount: junctionCount, edgeCount: edgeCount)
+    }
+
+    mutating func addJunction(at position: SIMD2<Float>) -> NativeNetworkJunction {
+        let junction = NativeNetworkJunction(id: nextUniqueJunctionID(), position: position)
+        junctions.append(junction)
+        selectJunction(junction.id)
+        return junction
+    }
+
+    mutating func addEdge(from startID: String, to endID: String) -> NativeNetworkEdge? {
+        guard startID != endID, junction(id: startID) != nil, junction(id: endID) != nil else {
+            return nil
+        }
+        guard edges.contains(where: { $0.fromJunctionID == startID && $0.toJunctionID == endID }) == false else {
+            return nil
+        }
+        let edge = NativeNetworkEdge(id: nextUniqueEdgeID(), fromJunctionID: startID, toJunctionID: endID)
+        edges.append(edge)
+        selectEdge(edge.id)
+        return edge
+    }
+
+    mutating func duplicateEdge(_ id: String) -> NativeNetworkEdge? {
+        guard let source = edge(id: id) else { return nil }
+        guard junction(id: source.fromJunctionID) != nil, junction(id: source.toJunctionID) != nil else { return nil }
+        var duplicate = source
+        duplicate.id = nextUniqueEdgeID()
+        edges.append(duplicate)
+        selectEdge(duplicate.id)
+        return duplicate
+    }
+
+    mutating func reverseEdge(_ id: String) -> NativeNetworkEdge? {
+        guard let source = edge(id: id) else { return nil }
+        guard junction(id: source.fromJunctionID) != nil, junction(id: source.toJunctionID) != nil else { return nil }
+        guard hasEdge(from: source.toJunctionID, to: source.fromJunctionID) == false else { return nil }
+        var reverse = source
+        reverse.id = nextUniqueEdgeID()
+        reverse.fromJunctionID = source.toJunctionID
+        reverse.toJunctionID = source.fromJunctionID
+        reverse.geometryPoints = Array(source.geometryPoints.reversed())
+        edges.append(reverse)
+        selectEdge(reverse.id)
+        return reverse
+    }
+
+    mutating func removeJunction(_ id: String) {
+        let removedEdgeIDs = Set(edges.filter { $0.fromJunctionID == id || $0.toJunctionID == id }.map(\.id))
+        junctions.removeAll { $0.id == id }
+        edges.removeAll { $0.fromJunctionID == id || $0.toJunctionID == id }
+        selectedJunctionIDs.remove(id)
+        selectedEdgeIDs.subtract(removedEdgeIDs)
+        if selectedJunctionID == id {
+            selectedJunctionID = nil
+        }
+        if let selectedEdgeID, removedEdgeIDs.contains(selectedEdgeID) {
+            self.selectedEdgeID = nil
+        }
+        if pendingEdgeStartJunctionID == id {
+            pendingEdgeStartJunctionID = nil
+        }
+    }
+
+    mutating func removeEdge(_ id: String) {
+        edges.removeAll { $0.id == id }
+        selectedEdgeIDs.remove(id)
+        if selectedEdgeID == id {
+            selectedEdgeID = nil
+        }
+    }
+
+    mutating func removeSelectedObjects() -> NativeNetworkSelectionRemoval? {
+        var junctionIDs = selectedJunctionIDs
+        if let selectedJunctionID {
+            junctionIDs.insert(selectedJunctionID)
+        }
+        var edgeIDs = selectedEdgeIDs
+        if let selectedEdgeID {
+            edgeIDs.insert(selectedEdgeID)
+        }
+        guard junctionIDs.isEmpty == false || edgeIDs.isEmpty == false else { return nil }
+
+        for edge in edges where junctionIDs.contains(edge.fromJunctionID) || junctionIDs.contains(edge.toJunctionID) {
+            edgeIDs.insert(edge.id)
+        }
+
+        let junctionCount = junctions.filter { junctionIDs.contains($0.id) }.count
+        let edgeCount = edges.filter { edgeIDs.contains($0.id) }.count
+
+        junctions.removeAll { junctionIDs.contains($0.id) }
+        edges.removeAll { edgeIDs.contains($0.id) }
+        if let pendingEdgeStartJunctionID, junctionIDs.contains(pendingEdgeStartJunctionID) {
+            self.pendingEdgeStartJunctionID = nil
+        }
+        clearSelection()
+        return NativeNetworkSelectionRemoval(junctionCount: junctionCount, edgeCount: edgeCount)
+    }
+
+    mutating func moveJunction(_ id: String, to position: SIMD2<Float>) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        let delta = position - junctions[index].position
+        junctions[index].position = position
+        if junctions[index].hasCustomShape {
+            junctions[index].shapePoints = junctions[index].shapePoints.map { $0 + delta }
+        }
+        return true
+    }
+
+    mutating func updateJunction(_ id: String, type: String) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        junctions[index].type = type
+        return true
+    }
+
+    mutating func updateJunction(_ id: String, radius: Float) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }), radius.isFinite, radius > 0 else { return false }
+        junctions[index].radius = radius
+        return true
+    }
+
+    mutating func customizeJunctionShape(_ id: String) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        guard junctions[index].hasCustomShape == false else { return false }
+        junctions[index].shapePoints = junctionShape(for: junctions[index])
+        focusJunction(id, preservingSelection: true)
+        return true
+    }
+
+    mutating func resetJunctionShape(_ id: String) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        guard junctions[index].hasCustomShape else { return false }
+        junctions[index].shapePoints = []
+        focusJunction(id, preservingSelection: true)
+        return true
+    }
+
+    mutating func addShapePoint(toJunction id: String) -> Int? {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return nil }
+        if junctions[index].hasCustomShape == false {
+            junctions[index].shapePoints = junctionShape(for: junctions[index])
+        }
+        let shape = junctions[index].shapePoints
+        guard shape.count >= 3 else { return nil }
+        var bestSegmentIndex = 0
+        var bestLength: Float = -1
+        for pointIndex in 0..<shape.count {
+            let nextIndex = (pointIndex + 1) % shape.count
+            let length = distance(shape[pointIndex], shape[nextIndex])
+            if length > bestLength {
+                bestSegmentIndex = pointIndex
+                bestLength = length
+            }
+        }
+        let nextIndex = (bestSegmentIndex + 1) % shape.count
+        let midpoint = (shape[bestSegmentIndex] + shape[nextIndex]) * 0.5
+        let insertionIndex = bestSegmentIndex + 1
+        if insertionIndex >= junctions[index].shapePoints.count {
+            junctions[index].shapePoints.append(midpoint)
+        } else {
+            junctions[index].shapePoints.insert(midpoint, at: insertionIndex)
+        }
+        focusJunction(id, preservingSelection: true)
+        return insertionIndex
+    }
+
+    mutating func removeLastShapePoint(fromJunction id: String) -> Bool {
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        guard junctions[index].shapePoints.count > 3 else { return false }
+        junctions[index].shapePoints.removeLast()
+        focusJunction(id, preservingSelection: true)
+        return true
+    }
+
+    mutating func moveJunctionShapePoint(junctionID: String, pointIndex: Int, to position: SIMD2<Float>) -> Bool {
+        guard
+            let index = junctions.firstIndex(where: { $0.id == junctionID }),
+            junctions[index].shapePoints.indices.contains(pointIndex)
+        else {
+            return false
+        }
+        junctions[index].shapePoints[pointIndex] = position
+        focusJunction(junctionID, preservingSelection: true)
+        return true
+    }
+
+    mutating func renameJunction(_ id: String, to newID: String) -> Bool {
+        guard id != newID else { return false }
+        guard junction(id: newID) == nil else { return false }
+        guard let index = junctions.firstIndex(where: { $0.id == id }) else { return false }
+        junctions[index].id = newID
+        for edgeIndex in edges.indices {
+            if edges[edgeIndex].fromJunctionID == id {
+                edges[edgeIndex].fromJunctionID = newID
+            }
+            if edges[edgeIndex].toJunctionID == id {
+                edges[edgeIndex].toJunctionID = newID
+            }
+        }
+        if selectedJunctionID == id {
+            selectedJunctionID = newID
+        }
+        if selectedJunctionIDs.remove(id) != nil {
+            selectedJunctionIDs.insert(newID)
+        }
+        if pendingEdgeStartJunctionID == id {
+            pendingEdgeStartJunctionID = newID
+        }
+        return true
+    }
+
+    mutating func renameEdge(_ id: String, to newID: String) -> Bool {
+        guard id != newID else { return false }
+        guard edge(id: newID) == nil else { return false }
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].id = newID
+        if selectedEdgeID == id {
+            selectedEdgeID = newID
+        }
+        if selectedEdgeIDs.remove(id) != nil {
+            selectedEdgeIDs.insert(newID)
+        }
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, priority: Int16) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].priority = priority
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, laneCount: Int) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].laneCount = max(1, laneCount)
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, speed: Float) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }), speed.isFinite, speed > 0 else { return false }
+        edges[index].speed = speed
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, laneWidth: Float) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }), laneWidth.isFinite, laneWidth > 0 else { return false }
+        edges[index].laneWidth = laneWidth
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, fromJunctionID: String) -> Bool {
+        guard junction(id: fromJunctionID) != nil else { return false }
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        guard fromJunctionID != edges[index].toJunctionID else { return false }
+        edges[index].fromJunctionID = fromJunctionID
+        selectedEdgeID = id
+        selectedJunctionID = nil
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, toJunctionID: String) -> Bool {
+        guard junction(id: toJunctionID) != nil else { return false }
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        guard toJunctionID != edges[index].fromJunctionID else { return false }
+        edges[index].toJunctionID = toJunctionID
+        selectedEdgeID = id
+        selectedJunctionID = nil
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, spreadType: String) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].spreadType = spreadType
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, allow: String) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].allow = allow
+        if allow.isEmpty == false {
+            edges[index].disallow = ""
+        }
+        return true
+    }
+
+    mutating func updateEdge(_ id: String, disallow: String) -> Bool {
+        guard let index = edges.firstIndex(where: { $0.id == id }) else { return false }
+        edges[index].disallow = disallow
+        if disallow.isEmpty == false {
+            edges[index].allow = ""
+        }
+        return true
+    }
+
+    mutating func addGeometryPoint(toEdge id: String) -> Int? {
+        guard let edgeIndex = edges.firstIndex(where: { $0.id == id }) else { return nil }
+        let path = edgePath(edges[edgeIndex])
+        guard path.count >= 2 else { return nil }
+        var bestSegmentIndex = 0
+        var bestLength: Float = -1
+        for index in 0..<(path.count - 1) {
+            let length = distance(path[index], path[index + 1])
+            if length > bestLength {
+                bestSegmentIndex = index
+                bestLength = length
+            }
+        }
+        let midpoint = (path[bestSegmentIndex] + path[bestSegmentIndex + 1]) * 0.5
+        let insertionIndex = min(bestSegmentIndex, edges[edgeIndex].geometryPoints.count)
+        edges[edgeIndex].geometryPoints.insert(midpoint, at: insertionIndex)
+        focusEdge(id, preservingSelection: true)
+        return insertionIndex
+    }
+
+    mutating func removeLastGeometryPoint(fromEdge id: String) -> Bool {
+        guard let edgeIndex = edges.firstIndex(where: { $0.id == id }) else { return false }
+        guard edges[edgeIndex].geometryPoints.isEmpty == false else { return false }
+        edges[edgeIndex].geometryPoints.removeLast()
+        focusEdge(id, preservingSelection: true)
+        return true
+    }
+
+    mutating func moveEdgeGeometryPoint(edgeID: String, pointIndex: Int, to position: SIMD2<Float>) -> Bool {
+        guard
+            let edgeIndex = edges.firstIndex(where: { $0.id == edgeID }),
+            edges[edgeIndex].geometryPoints.indices.contains(pointIndex)
+        else {
+            return false
+        }
+        edges[edgeIndex].geometryPoints[pointIndex] = position
+        focusEdge(edgeID, preservingSelection: true)
+        return true
+    }
+
+    mutating func selectJunction(_ id: String, extending: Bool = false) {
+        guard junction(id: id) != nil else { return }
+        if extending {
+            if selectedJunctionIDs.contains(id) {
+                selectedJunctionIDs.remove(id)
+                if selectedJunctionID == id {
+                    selectedJunctionID = selectedJunctionIDs.sorted().first
+                }
+            } else {
+                selectedJunctionIDs.insert(id)
+                selectedJunctionID = id
+            }
+            selectedEdgeID = nil
+        } else {
+            selectedJunctionIDs = [id]
+            selectedEdgeIDs = []
+            selectedJunctionID = id
+            selectedEdgeID = nil
+        }
+    }
+
+    mutating func selectEdge(_ id: String, extending: Bool = false) {
+        guard edge(id: id) != nil else { return }
+        if extending {
+            if selectedEdgeIDs.contains(id) {
+                selectedEdgeIDs.remove(id)
+                if selectedEdgeID == id {
+                    selectedEdgeID = selectedEdgeIDs.sorted().first
+                }
+            } else {
+                selectedEdgeIDs.insert(id)
+                selectedEdgeID = id
+            }
+            selectedJunctionID = nil
+        } else {
+            selectedEdgeIDs = [id]
+            selectedJunctionIDs = []
+            selectedEdgeID = id
+            selectedJunctionID = nil
+        }
+    }
+
+    mutating func selectObjects(in bounds: SIMD4<Float>, extending: Bool) -> NativeNetworkSelectionSummary {
+        let normalized = Self.normalizedBounds(bounds)
+        let junctionIDs = Set(junctions.filter { junctionIntersectsBounds($0, bounds: normalized) }.map(\.id))
+        let edgeIDs = Set(edges.filter { edgeIntersectsBounds($0, bounds: normalized) }.map(\.id))
+
+        if extending {
+            selectedJunctionIDs.formUnion(junctionIDs)
+            selectedEdgeIDs.formUnion(edgeIDs)
+        } else {
+            selectedJunctionIDs = junctionIDs
+            selectedEdgeIDs = edgeIDs
+        }
+
+        selectedJunctionID = selectedJunctionIDs.sorted().first
+        selectedEdgeID = selectedJunctionID == nil ? selectedEdgeIDs.sorted().first : nil
+        return NativeNetworkSelectionSummary(junctionCount: junctionIDs.count, edgeCount: edgeIDs.count)
+    }
+
+    mutating func focusJunction(_ id: String, preservingSelection: Bool) {
+        if preservingSelection, selectedJunctionIDs.contains(id) {
+            selectedJunctionID = id
+            selectedEdgeID = nil
+        } else {
+            selectJunction(id)
+        }
+    }
+
+    mutating func focusEdge(_ id: String, preservingSelection: Bool) {
+        if preservingSelection, selectedEdgeIDs.contains(id) {
+            selectedEdgeID = id
+            selectedJunctionID = nil
+        } else {
+            selectEdge(id)
+        }
+    }
+
+    mutating func clearSelection() {
+        selectedJunctionID = nil
+        selectedEdgeID = nil
+        selectedJunctionIDs = []
+        selectedEdgeIDs = []
+    }
+
+    private mutating func nextUniqueJunctionID() -> String {
+        while junction(id: "J\(nextJunctionNumber)") != nil {
+            nextJunctionNumber += 1
+        }
+        defer { nextJunctionNumber += 1 }
+        return "J\(nextJunctionNumber)"
+    }
+
+    private mutating func nextUniqueEdgeID() -> String {
+        while edge(id: "E\(nextEdgeNumber)") != nil {
+            nextEdgeNumber += 1
+        }
+        defer { nextEdgeNumber += 1 }
+        return "E\(nextEdgeNumber)"
+    }
+
+    private static func nextNumber(after ids: [String], prefix: String) -> Int {
+        let numbers = ids.compactMap { id -> Int? in
+            guard id.hasPrefix(prefix) else { return nil }
+            return Int(id.dropFirst(prefix.count))
+        }
+        return (numbers.max() ?? -1) + 1
+    }
+
+    private static func estimatedJunctionRadius(center: SIMD2<Float>, shape: [SIMD2<Float>]) -> Float {
+        let radius = shape.reduce(Float(0)) { partial, point in
+            let dx = point.x - center.x
+            let dy = point.y - center.y
+            return max(partial, sqrt(dx * dx + dy * dy))
+        }
+        return radius.isFinite && radius > 0 ? radius : NativeNetworkJunction.defaultRadius
+    }
+
+    private func nextNumber(after ids: [String], prefix: String) -> Int {
+        Self.nextNumber(after: ids, prefix: prefix)
+    }
+
+    private func distance(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private static func defaultJunctionShape(center: SIMD2<Float>, radius: Float) -> [SIMD2<Float>] {
+        let half = radius.isFinite && radius > 0 ? radius : NativeNetworkJunction.defaultRadius
+        return [
+            SIMD2(center.x - half, center.y - half),
+            SIMD2(center.x + half, center.y - half),
+            SIMD2(center.x + half, center.y + half),
+            SIMD2(center.x - half, center.y + half),
+        ]
+    }
+
+    private func junctionIntersectsBounds(_ junction: NativeNetworkJunction, bounds: SIMD4<Float>) -> Bool {
+        if Self.bounds(bounds, contains: junction.position) {
+            return true
+        }
+        let shape = junctionShape(for: junction)
+        if shape.contains(where: { Self.bounds(bounds, contains: $0) }) {
+            return true
+        }
+        guard shape.count > 1 else { return false }
+        for index in 0..<shape.count {
+            if Self.segmentIntersectsBounds(from: shape[index], to: shape[(index + 1) % shape.count], bounds: bounds) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private func edgeIntersectsBounds(_ edge: NativeNetworkEdge, bounds: SIMD4<Float>) -> Bool {
+        let points = edgePath(edge)
+        guard points.isEmpty == false else { return false }
+        if points.contains(where: { Self.bounds(bounds, contains: $0) }) {
+            return true
+        }
+        guard points.count > 1 else { return false }
+        for index in 0..<(points.count - 1) {
+            if Self.segmentIntersectsBounds(from: points[index], to: points[index + 1], bounds: bounds) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func normalizedBounds(_ bounds: SIMD4<Float>) -> SIMD4<Float> {
+        SIMD4(
+            min(bounds.x, bounds.z),
+            min(bounds.y, bounds.w),
+            max(bounds.x, bounds.z),
+            max(bounds.y, bounds.w)
+        )
+    }
+
+    private static func bounds(_ bounds: SIMD4<Float>, contains point: SIMD2<Float>) -> Bool {
+        point.x >= bounds.x && point.x <= bounds.z && point.y >= bounds.y && point.y <= bounds.w
+    }
+
+    private static func segmentIntersectsBounds(from start: SIMD2<Float>, to end: SIMD2<Float>, bounds: SIMD4<Float>) -> Bool {
+        let segmentBounds = SIMD4(
+            min(start.x, end.x),
+            min(start.y, end.y),
+            max(start.x, end.x),
+            max(start.y, end.y)
+        )
+        guard segmentBounds.z >= bounds.x,
+              segmentBounds.x <= bounds.z,
+              segmentBounds.w >= bounds.y,
+              segmentBounds.y <= bounds.w
+        else {
+            return false
+        }
+
+        let corners = [
+            SIMD2<Float>(bounds.x, bounds.y),
+            SIMD2<Float>(bounds.z, bounds.y),
+            SIMD2<Float>(bounds.z, bounds.w),
+            SIMD2<Float>(bounds.x, bounds.w),
+        ]
+        for index in 0..<corners.count {
+            if segmentsIntersect(start, end, corners[index], corners[(index + 1) % corners.count]) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private static func segmentsIntersect(
+        _ a: SIMD2<Float>,
+        _ b: SIMD2<Float>,
+        _ c: SIMD2<Float>,
+        _ d: SIMD2<Float>
+    ) -> Bool {
+        let o1 = orientation(a, b, c)
+        let o2 = orientation(a, b, d)
+        let o3 = orientation(c, d, a)
+        let o4 = orientation(c, d, b)
+
+        if o1 == 0, onSegment(a, c, b) { return true }
+        if o2 == 0, onSegment(a, d, b) { return true }
+        if o3 == 0, onSegment(c, a, d) { return true }
+        if o4 == 0, onSegment(c, b, d) { return true }
+        return (o1 > 0) != (o2 > 0) && (o3 > 0) != (o4 > 0)
+    }
+
+    private static func orientation(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD2<Float>) -> Float {
+        let value = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y)
+        return abs(value) < 0.0001 ? 0 : value
+    }
+
+    private static func onSegment(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD2<Float>) -> Bool {
+        b.x >= min(a.x, c.x) - 0.0001 &&
+            b.x <= max(a.x, c.x) + 0.0001 &&
+            b.y >= min(a.y, c.y) - 0.0001 &&
+            b.y <= max(a.y, c.y) + 0.0001
+    }
+}
+
+enum NativeNetworkGraphBuilder {
+    static func makeGraph(from state: NativeNetworkEditorState) -> NetGraph {
+        let graph = NetGraph()
+        var contentBounds = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
+
+        for junction in state.junctions {
+            let shape = state.junctionShape(for: junction)
+            let offset = Int32(graph.junctionShapePoints.count)
+            graph.junctionShapePoints.append(contentsOf: shape)
+            let bounds = bounds(for: shape)
+            let index = Int32(graph.junctions.count)
+            graph.junctionIndex[junction.id] = index
+            graph.junctions.append(Junction(
+                id: junction.id,
+                type: junction.type,
+                position: junction.position,
+                shapeOffset: offset,
+                shapeCount: Int32(shape.count),
+                bounds: bounds,
+                incomingLanes: [],
+                internalLanes: []
+            ))
+            contentBounds = mergeBounds(contentBounds, bounds)
+        }
+
+        let junctionByID = Dictionary(uniqueKeysWithValues: state.junctions.map { ($0.id, $0) })
+        for nativeEdge in state.edges {
+            guard
+                let from = junctionByID[nativeEdge.fromJunctionID],
+                let to = junctionByID[nativeEdge.toJunctionID]
+            else {
+                continue
+            }
+            let laneStart = Int32(graph.lanes.count)
+            let laneCount = max(nativeEdge.laneCount, 1)
+            let laneWidth = max(nativeEdge.laneWidth, 0.5)
+            var edgeBounds = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
+            for laneIndex in 0..<laneCount {
+                let laneID = "\(nativeEdge.id)_\(laneIndex)"
+                let centerline = [from.position] + nativeEdge.geometryPoints + [to.position]
+                let shape = laneShape(
+                    centerline: centerline,
+                    laneIndex: laneIndex,
+                    laneCount: laneCount,
+                    laneWidth: laneWidth
+                )
+                let shapeOffset = Int32(graph.laneShapePoints.count)
+                graph.laneShapePoints.append(contentsOf: shape)
+                let laneBounds = paddedBounds(bounds(for: shape), minimumSpan: 0.5)
+                let lane = Lane(
+                    id: laneID,
+                    edgeIndex: Int32(graph.edges.count),
+                    index: Int16(laneIndex),
+                    speed: nativeEdge.speed,
+                    length: polylineLength(centerline),
+                    width: laneWidth,
+                    allowsAll: true,
+                    shapeOffset: shapeOffset,
+                    shapeCount: Int32(shape.count),
+                    bounds: laneBounds
+                )
+                graph.laneIndex[laneID] = Int32(graph.lanes.count)
+                graph.lanes.append(lane)
+                edgeBounds = mergeBounds(edgeBounds, laneBounds)
+                if let junctionIndex = graph.junctionIndex[nativeEdge.toJunctionID] {
+                    graph.junctions[Int(junctionIndex)].incomingLanes.append(laneID)
+                }
+            }
+            let laneEnd = Int32(graph.lanes.count)
+            graph.edgeIndex[nativeEdge.id] = Int32(graph.edges.count)
+            graph.edges.append(Edge(
+                id: nativeEdge.id,
+                fromJunction: nativeEdge.fromJunctionID,
+                toJunction: nativeEdge.toJunctionID,
+                function: .normal,
+                priority: nativeEdge.priority,
+                laneRange: laneStart..<laneEnd,
+                bounds: edgeBounds
+            ))
+            contentBounds = mergeBounds(contentBounds, edgeBounds)
+        }
+
+        let declared = isValidBounds(contentBounds)
+            ? paddedBounds(contentBounds, minimumSpan: 120)
+            : SIMD4<Float>(-60, -60, 60, 60)
+        graph.location.convBoundary = SIMD4<Double>(
+            Double(declared.x),
+            Double(declared.y),
+            Double(declared.z),
+            Double(declared.w)
+        )
+        graph.location.origBoundary = graph.location.convBoundary
+        return graph
+    }
+
+    private static func laneShape(
+        centerline: [SIMD2<Float>],
+        laneIndex: Int,
+        laneCount: Int,
+        laneWidth: Float
+    ) -> [SIMD2<Float>] {
+        guard centerline.count > 1 else { return centerline }
+        guard laneCount > 1 else { return centerline }
+        let centerOffset = Float(laneIndex) - (Float(laneCount) - 1) * 0.5
+        let offsetDistance = centerOffset * (laneWidth + 0.4)
+        return centerline.indices.map { index in
+            let previous = centerline[max(centerline.startIndex, index - 1)]
+            let next = centerline[min(centerline.index(before: centerline.endIndex), index + 1)]
+            let direction = next - previous
+            let length = max(distance(previous, next), 0.001)
+            let normal = SIMD2<Float>(-direction.y / length, direction.x / length)
+            return centerline[index] + normal * offsetDistance
+        }
+    }
+
+    private static func bounds(for points: [SIMD2<Float>]) -> SIMD4<Float> {
+        var out = SIMD4<Float>(.infinity, .infinity, -.infinity, -.infinity)
+        for point in points {
+            out = mergeBounds(out, SIMD4<Float>(point.x, point.y, point.x, point.y))
+        }
+        return out
+    }
+
+    private static func distance(_ a: SIMD2<Float>, _ b: SIMD2<Float>) -> Float {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        return sqrt(dx * dx + dy * dy)
+    }
+
+    private static func polylineLength(_ points: [SIMD2<Float>]) -> Float {
+        guard points.count > 1 else { return 0 }
+        var total: Float = 0
+        for index in 0..<(points.count - 1) {
+            total += distance(points[index], points[index + 1])
+        }
+        return total
+    }
+
+    private static func isValidBounds(_ bounds: SIMD4<Float>) -> Bool {
+        bounds.x.isFinite && bounds.y.isFinite && bounds.z.isFinite && bounds.w.isFinite && bounds.x <= bounds.z && bounds.y <= bounds.w
+    }
+
+    private static func mergeBounds(_ lhs: SIMD4<Float>, _ rhs: SIMD4<Float>) -> SIMD4<Float> {
+        if !isValidBounds(lhs) { return rhs }
+        if !isValidBounds(rhs) { return lhs }
+        return SIMD4(min(lhs.x, rhs.x), min(lhs.y, rhs.y), max(lhs.z, rhs.z), max(lhs.w, rhs.w))
+    }
+
+    private static func paddedBounds(_ bounds: SIMD4<Float>, minimumSpan: Float) -> SIMD4<Float> {
+        guard isValidBounds(bounds) else { return SIMD4(0, 0, minimumSpan, minimumSpan) }
+        var out = bounds
+        if out.z - out.x < minimumSpan {
+            let mid = (out.x + out.z) * 0.5
+            out.x = mid - minimumSpan * 0.5
+            out.z = mid + minimumSpan * 0.5
+        }
+        if out.w - out.y < minimumSpan {
+            let mid = (out.y + out.w) * 0.5
+            out.y = mid - minimumSpan * 0.5
+            out.w = mid + minimumSpan * 0.5
+        }
+        return out
+    }
+}
+
+struct NativeNetworkExportPlan: Equatable {
+    let netURL: URL
+    let nodeURL: URL
+    let edgeURL: URL
+    let configURL: URL
+
+    init(outputNetURL: URL) {
+        let netURL = Self.normalizedNetURL(outputNetURL)
+        self.netURL = netURL
+        let basePath = Self.basePath(for: netURL)
+        nodeURL = URL(fileURLWithPath: "\(basePath).nod.xml")
+        edgeURL = URL(fileURLWithPath: "\(basePath).edg.xml")
+        configURL = URL(fileURLWithPath: "\(basePath).sumocfg")
+    }
+
+    private static func normalizedNetURL(_ url: URL) -> URL {
+        let path = url.path
+        if path.lowercased().hasSuffix(".net.xml") {
+            return url
+        }
+        let base = path.lowercased().hasSuffix(".xml") ? String(path.dropLast(4)) : path
+        return URL(fileURLWithPath: "\(base).net.xml")
+    }
+
+    private static func basePath(for netURL: URL) -> String {
+        let path = netURL.path
+        if path.lowercased().hasSuffix(".net.xml") {
+            return String(path.dropLast(".net.xml".count))
+        }
+        return netURL.deletingPathExtension().path
+    }
+}
+
+enum NativeNetworkSUMOWriter {
+    static func writeSourceFiles(for state: NativeNetworkEditorState, plan: NativeNetworkExportPlan) throws {
+        try nodeXML(for: state).write(to: plan.nodeURL, atomically: true, encoding: .utf8)
+        try edgeXML(for: state).write(to: plan.edgeURL, atomically: true, encoding: .utf8)
+    }
+
+    static func writeConfigFile(plan: NativeNetworkExportPlan) throws {
+        let xml = """
+        <?xml version="1.0" encoding="UTF-8"?>
+        <configuration>
+            <input>
+                <net-file value="\(xmlEscape(plan.netURL.lastPathComponent))"/>
+            </input>
+        </configuration>
+
+        """
+        try xml.write(to: plan.configURL, atomically: true, encoding: .utf8)
+    }
+
+    static func nodeXML(for state: NativeNetworkEditorState) -> String {
+        var lines = [
+            #"<?xml version="1.0" encoding="UTF-8"?>"#,
+            "<nodes>",
+        ]
+        for junction in state.junctions.sorted(by: { $0.id < $1.id }) {
+            var attributes = [
+                #"id="\#(xmlEscape(junction.id))""#,
+                #"x="\#(decimal(junction.position.x))""#,
+                #"y="\#(decimal(junction.position.y))""#,
+                #"type="\#(xmlEscape(junction.type))""#,
+            ]
+            if let shape = shapeAttribute(for: junction) {
+                attributes.append(#"shape="\#(xmlEscape(shape))""#)
+            } else if abs(junction.radius - NativeNetworkJunction.defaultRadius) > 0.001 {
+                attributes.append(#"radius="\#(decimal(junction.radius))""#)
+            }
+            lines.append(
+                "    <node \(attributes.joined(separator: " "))/>"
+            )
+        }
+        lines.append("</nodes>")
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    static func edgeXML(for state: NativeNetworkEditorState) -> String {
+        var lines = [
+            #"<?xml version="1.0" encoding="UTF-8"?>"#,
+            "<edges>",
+        ]
+        for edge in state.edges.sorted(by: { $0.id < $1.id }) {
+            var attributes = [
+                #"id="\#(xmlEscape(edge.id))""#,
+                #"from="\#(xmlEscape(edge.fromJunctionID))""#,
+                #"to="\#(xmlEscape(edge.toJunctionID))""#,
+                #"priority="\#(edge.priority)""#,
+                #"numLanes="\#(edge.laneCount)""#,
+                #"speed="\#(decimal(edge.speed))""#,
+                #"width="\#(decimal(edge.laneWidth))""#,
+                #"spreadType="\#(xmlEscape(edge.spreadType))""#,
+            ]
+            if edge.allow.isEmpty == false {
+                attributes.append(#"allow="\#(xmlEscape(edge.allow))""#)
+            }
+            if edge.disallow.isEmpty == false {
+                attributes.append(#"disallow="\#(xmlEscape(edge.disallow))""#)
+            }
+            if let shape = shapeAttribute(for: edge, in: state) {
+                attributes.append(#"shape="\#(xmlEscape(shape))""#)
+            }
+            lines.append(
+                "    <edge \(attributes.joined(separator: " "))/>"
+            )
+        }
+        lines.append("</edges>")
+        lines.append("")
+        return lines.joined(separator: "\n")
+    }
+
+    private static func decimal(_ value: Float) -> String {
+        String(format: "%.3f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+
+    private static func shapeAttribute(for edge: NativeNetworkEdge, in state: NativeNetworkEditorState) -> String? {
+        guard edge.geometryPoints.isEmpty == false else { return nil }
+        let shape = state.edgePath(edge)
+        guard shape.count > 2 else { return nil }
+        return shape
+            .map { "\(decimal($0.x)),\(decimal($0.y))" }
+            .joined(separator: " ")
+    }
+
+    private static func shapeAttribute(for junction: NativeNetworkJunction) -> String? {
+        guard junction.hasCustomShape else { return nil }
+        return junction.shapePoints
+            .map { "\(decimal($0.x)),\(decimal($0.y))" }
+            .joined(separator: " ")
+    }
+
+    private static func xmlEscape(_ value: String) -> String {
+        value
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&apos;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+    }
+}
+
+struct NetEditLaunchPlan: Equatable {
+    let url: URL
+
+    var arguments: [String] {
+        if url.lastPathComponent.lowercased().hasSuffix(".net.xml") {
+            return ["-s", url.path]
+        }
+        if url.pathExtension.lowercased() == "sumocfg" {
+            return ["--sumocfg-file", url.path]
+        }
+        return ["--sumocfg-file", url.path]
     }
 }
 

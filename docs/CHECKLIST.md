@@ -44,7 +44,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ### Pipelines (`SumoGUIMac/Render/`)
 - [~] `NetworkView.swift` — `NSViewRepresentable` wrapping `MTKView` (static parsed network display works; lanes, junctions, and vehicles now use Metal; renderer polish pending)
-- [~] Camera: cursor-anchored zoom, pinch, double-click zoom, drag pan, and trackpad pan are wired; rubber-band select pending
+- [~] Camera: cursor-anchored zoom, pinch, double-click zoom, drag pan, and trackpad pan are wired; native-editor rubber-band selection is wired, broader camera polish pending
 - [~] Lane shader: instanced quad pass with per-lane width, speed-derived colour, selected-edge highlight, and CPU LOD culling below 0.5 px is wired; line joins polish pending
 - [~] Junction shader: filled triangle-fan polygons from parsed junction shapes are wired; robust concave triangulation/styling pending
 - [~] Vehicle shader: instanced triangle pass with speed/type-derived colour, render-side interpolation, selected-vehicle highlight, and physical screen-size metrics is wired; richer sizing/selection overlay polish pending
@@ -93,6 +93,9 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 - [~] Screenshot/video export (PNG export from the current native view is wired; MP4 via AVFoundation pending)
 - [~] Notarization-ready build path (`SumoGUIMacApp` Xcode scheme builds a signed local `.app`; `Scripts/build-alpha-release.sh` creates an ad-hoc signed alpha zip; developer-team signing and notarization still pending)
 - [x] README with screenshot, install instructions, contributing guide (README includes app icon, live FlowDemo screenshot, build/run/release instructions, interaction notes, contribution loop, and SUMO citation/credits; 2026-05-03, codex)
+- [x] NetEdit bridge: open current `.sumocfg`/`.net.xml`, choose a file for NetEdit, or create a new NetEdit network using the user-installed SUMO tools (2026-05-03, codex)
+- [x] First clean-room native NetEdit slice: in-app draft network editor with junction creation, edge creation, custom junction shapes, Metal preview, and export to public SUMO node/edge files plus `netconvert` compilation when available (2026-05-03, codex)
+- [~] Native editor parity plan: `docs/EDITOR_PARITY_PLAN.md` defines clean-room milestones from simple node/edge editing to demand/additional-object editing and viewer-grade UX parity (2026-05-03, codex)
 - [ ] First public tag: `v0.1.0`
 
 ---
@@ -103,7 +106,7 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 - [-] Multiple synchronised viewports
 - [-] Person/pedestrian rendering with full sumo-gui modes
 - [-] OSG-equivalent decals
-- [-] netedit replacement
+- [-] Full native netedit replacement beyond the bridge workflow
 - [-] FMI co-simulation hookup
 - [-] Replay mode driven from `.fcd-output` without running SUMO
 
@@ -111,8 +114,8 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 
 ## Handoff state (update at end of every session)
 
-- **Last touched:** 2026-05-03 — codex — Continued Day 7 stability/scale work. Added `Scripts/make-large-benchmark-scenario.sh`, which can download or import OSM data, build a SUMO `.net.xml`, generate large random-trip routes, write a runnable `.sumocfg`, and hand the network to `NetParseBenchmark`. Also hardened failed TraCI step handling so a killed SUMO process leaves the UI in a clean disconnected state.
-- **Next action:** Run the generated large OSM benchmark for one hour of sim time, profile with Instruments, and fix the top hot paths. Also run the first GitHub Actions CI pass after pushing, live-smoke external attach with `sumo --remote-port <port> --num-clients 2` and a second controller client, then validate exported `<viewsettings>` against upstream sumo-gui.
+- **Last touched:** 2026-05-04 — codex — Continued native editor precision work. Native Select mode now supports custom junction shape handles: the inspector and Editor menu can convert a radius junction into an editable SUMO node polygon, add/remove shape points, drag visible handles on the canvas, preserve custom shapes when moving junctions, and export node `shape` attributes. Tests now cover custom junction shape editing, graph preview shape updates, node XML export, handle exposure, and reset behavior alongside the existing renderer coordinate conversion, transform round-tripping, grid snapping, edge geometry-point editing/export, duplicate/reverse edges, endpoint editing, junction radius preview/export, Shift-click multi-select, rubber-band selection including crossing edges, bulk delete/undo, rename propagation, public SUMO XML export attributes, and preview graph lane width.
+- **Next action:** Continue E1/E2 from `docs/EDITOR_PARITY_PLAN.md`: add object endpoint/background-map hint snapping, begin connection display/selection after `netconvert`, add XML snapshot tests for exported public files, extract editor state from `SimulationViewModel`, and factor shape/geometry handle drawing into a reusable editor overlay. Also run the generated large OSM benchmark for one hour of sim time, profile with Instruments, and live-smoke external attach with `sumo --remote-port <port> --num-clients 2`.
 - **Known blockers:** External attach mode needs a live multi-client SUMO smoke test with the controller at one TraCI order and SumoGUIMac at another. The local active SUMO binary reports 1.25.0 while the app target constant is 1.26.0, so the compatibility guard warns until the local runtime is upgraded or the target is intentionally changed. Tracker charts are embedded in the inspector rather than detached SUMO-style tracker windows, and arbitrary TraCI variable picking is still pending. Visualization XML is SUMO-style but has not yet been validated as byte-for-byte compatible with upstream sumo-gui view settings, and background georeferencing currently supports manual bounds plus adjacent world files rather than native GeoTIFF tags. Release signing is local/ad-hoc only; Developer ID signing and notarization are still pending. Junction triangulation is simple fan triangulation, so unusual concave junction shapes may need a more robust tessellator.
 - **Local SUMO version targeted:** App target = 1.26.0. Current located binary = `/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO/bin/sumo`, which reports 1.25.0. SUMO_HOME for the python tools should point at the matching framework's `share/sumo`.
 

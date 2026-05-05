@@ -2,7 +2,7 @@
 
 A native macOS port of [Eclipse SUMO](https://eclipse.dev/sumo/)'s `sumo-gui`, written in SwiftUI + Metal, targeting feature parity with `sumo-gui` 1.26.0 over TraCI.
 
-**Status:** pre-alpha native app in progress — TraCI core green; native SwiftUI app opens `.sumocfg`, launches SUMO, attaches to external TraCI runs, steps/plays, renders lanes/junctions/live vehicles in Metal, supports basic object inspection, and builds as a local Xcode `.app` bundle.
+**Status:** pre-alpha native app in progress — TraCI core green; native SwiftUI app opens `.sumocfg`, launches SUMO, attaches to external TraCI runs, steps/plays, renders lanes/junctions/live vehicles in Metal, supports basic object inspection, includes a first clean-room native editor draft, and builds as a local Xcode `.app` bundle.
 **License:** MIT (open-source, contributions welcome)
 **SUMO distribution:** not bundled; users install SUMO separately and the app talks to it over TraCI.
 **Author:** christoi@tcd.ie
@@ -24,7 +24,7 @@ Open existing SUMO `.sumocfg` files in a native macOS GUI, watch and control the
 
 ## Non-goals (v1)
 
-- `netedit` (network editor) — separate effort, defer.
+- Full upstream NetEdit parity — the native editor starts with clean-room node/edge editing and keeps official NetEdit available as a bridge.
 - Windows/Linux builds — Mac-only, by design.
 - 3D mode (OSG/SceneKit) — defer to v2.
 
@@ -38,6 +38,7 @@ Two Swift Packages: `SumoKit` (engine: TraCI client, `.net.xml` parser, spatial 
 
 - [CHECKLIST.md](docs/CHECKLIST.md) — parity progress + handoff state. **Update this every session.**
 - [ARCHITECTURE.md](docs/ARCHITECTURE.md) — how the pieces fit, where to add things.
+- [EDITOR_PARITY_PLAN.md](docs/EDITOR_PARITY_PLAN.md) — clean-room plan for growing the native editor.
 - [DECISIONS.md](docs/DECISIONS.md) — log of architectural choices and their rationale.
 - [DEV_SETUP.md](docs/DEV_SETUP.md) — how to build & run.
 

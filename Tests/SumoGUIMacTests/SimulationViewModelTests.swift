@@ -97,6 +97,556 @@ final class SimulationViewModelTests: XCTestCase {
         XCTAssertEqual(parsed.palette.vehicleUniform.blue, 0.3, accuracy: 0.01)
     }
 
+    func testNetEditLaunchPlanUsesNativeInputFlags() {
+        let config = URL(fileURLWithPath: "/tmp/example.sumocfg")
+        let network = URL(fileURLWithPath: "/tmp/example.net.xml")
+
+        XCTAssertEqual(NetEditLaunchPlan(url: config).arguments, ["--sumocfg-file", "/tmp/example.sumocfg"])
+        XCTAssertEqual(NetEditLaunchPlan(url: network).arguments, ["-s", "/tmp/example.net.xml"])
+    }
+
+    func testNativeNetworkEditorCreatesJunctionsEdgesAndPreviewGraph() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(80, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(80, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+
+        XCTAssertTrue(viewModel.nativeNetworkEditingEnabled)
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J0", "J1"])
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), ["E0"])
+        XCTAssertEqual(viewModel.graph?.junctions.count, 2)
+        XCTAssertEqual(viewModel.graph?.edges.count, 1)
+        XCTAssertEqual(viewModel.graph?.lanes.count, 1)
+        XCTAssertEqual(viewModel.selectedEdgeID, "E0")
+    }
+
+    func testNativeNetworkSUMOExportsUsePublicNodeAndEdgeFormats() {
+        var state = NativeNetworkEditorState(isEnabled: true)
+        _ = state.addJunction(at: SIMD2<Float>(0, 0))
+        _ = state.addJunction(at: SIMD2<Float>(10.5, -2))
+        _ = state.addEdge(from: "J0", to: "J1")
+
+        let nodeXML = NativeNetworkSUMOWriter.nodeXML(for: state)
+        let edgeXML = NativeNetworkSUMOWriter.edgeXML(for: state)
+        let plan = NativeNetworkExportPlan(outputNetURL: URL(fileURLWithPath: "/tmp/example.net.xml"))
+
+        XCTAssertTrue(nodeXML.contains(#"<node id="J0" x="0.000" y="0.000" type="priority"/>"#))
+        XCTAssertTrue(nodeXML.contains(#"<node id="J1" x="10.500" y="-2.000" type="priority"/>"#))
+        XCTAssertTrue(edgeXML.contains(#"<edge id="E0" from="J0" to="J1" priority="1" numLanes="1" speed="13.890" width="3.200" spreadType="right"/>"#))
+        XCTAssertEqual(plan.nodeURL.path, "/tmp/example.nod.xml")
+        XCTAssertEqual(plan.edgeURL.path, "/tmp/example.edg.xml")
+        XCTAssertEqual(plan.configURL.path, "/tmp/example.sumocfg")
+    }
+
+    func testNativeNetworkEditorEditsAndExportsJunctionShapes() async throws {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.selectNativeJunction("J0")
+        XCTAssertTrue(viewModel.nativeJunctionShapeHandles.isEmpty)
+
+        viewModel.customizeSelectedNativeJunctionShape()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.shapePoints.count, 4)
+        XCTAssertEqual(viewModel.nativeJunctionShapeHandles.map(\.id), [
+            "J0:shape:0",
+            "J0:shape:1",
+            "J0:shape:2",
+            "J0:shape:3",
+        ])
+
+        viewModel.addShapePointToSelectedNativeJunction()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.shapePoints.count, 5)
+
+        viewModel.moveNativeJunctionShapePoint(junctionID: "J0", pointIndex: 0, to: SIMD2<Float>(-12, -8))
+        viewModel.finishNativeJunctionShapePointMoveGesture()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.shapePoints.first, SIMD2<Float>(-12, -8))
+
+        let junction = try XCTUnwrap(viewModel.graph?.junctions.first { $0.id == "J0" })
+        let graphShape = Array(try XCTUnwrap(viewModel.graph).junctionShape(junction))
+        XCTAssertEqual(graphShape.first, SIMD2<Float>(-12, -8))
+
+        let shapedNodeXML = NativeNetworkSUMOWriter.nodeXML(for: viewModel.nativeEditor)
+        XCTAssertTrue(shapedNodeXML.contains(#"shape="-12.000,-8.000 0.000,-4.000 4.000,-4.000 4.000,4.000 -4.000,4.000""#))
+
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(10, 5))
+        viewModel.finishNativeJunctionMoveGesture()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(10, 5))
+        XCTAssertEqual(viewModel.selectedNativeJunction?.shapePoints.first, SIMD2<Float>(-2, -3))
+
+        viewModel.resetSelectedNativeJunctionShape()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.shapePoints, [])
+        XCTAssertFalse(NativeNetworkSUMOWriter.nodeXML(for: viewModel.nativeEditor).contains("shape="))
+    }
+
+    func testNativeNetworkEditorMovesUpdatesAndDeletesDraftObjects() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+
+        viewModel.selectNativeJunction("J0")
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(5, 7))
+        viewModel.finishNativeJunctionMoveGesture()
+        viewModel.setSelectedNativeJunctionType("traffic_light")
+        viewModel.setSelectedNativeJunctionID("north_in")
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(5, 7))
+        XCTAssertEqual(viewModel.selectedNativeJunction?.type, "traffic_light")
+        XCTAssertEqual(viewModel.selectedNativeJunction?.id, "north_in")
+        XCTAssertEqual(viewModel.graph?.junctions.first(where: { $0.id == "north_in" })?.position, SIMD2<Float>(5, 7))
+
+        viewModel.selectNativeEdge("E0")
+        viewModel.setSelectedNativeEdgeID("north_to_south")
+        viewModel.setSelectedNativeEdgePriority(4)
+        viewModel.setSelectedNativeEdgeLaneCount(3)
+        viewModel.setSelectedNativeEdgeSpeed(22.2)
+        viewModel.setSelectedNativeEdgeLaneWidth(4.0)
+        viewModel.setSelectedNativeEdgeSpreadType("center")
+        viewModel.setSelectedNativeEdgeAllow("passenger bus")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.priority, 4)
+        XCTAssertEqual(viewModel.selectedNativeEdge?.laneCount, 3)
+        XCTAssertEqual(viewModel.selectedNativeEdge?.speed ?? 0, 22.2, accuracy: 0.001)
+        XCTAssertEqual(viewModel.selectedNativeEdge?.laneWidth ?? 0, 4.0, accuracy: 0.001)
+        XCTAssertEqual(viewModel.selectedNativeEdge?.spreadType, "center")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.allow, "passenger bus")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.id, "north_to_south")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "north_in")
+        XCTAssertEqual(viewModel.graph?.lanes.count, 3)
+        XCTAssertEqual(viewModel.graph?.lanes.first?.width ?? 0, 4.0, accuracy: 0.001)
+
+        let edgeXML = NativeNetworkSUMOWriter.edgeXML(for: viewModel.nativeEditor)
+        XCTAssertTrue(edgeXML.contains(#"id="north_to_south" from="north_in" to="J1" priority="4" numLanes="3" speed="22.200" width="4.000" spreadType="center" allow="passenger bus""#))
+
+        viewModel.deleteSelectedNativeObject()
+        XCTAssertTrue(viewModel.nativeEditor.edges.isEmpty)
+
+        viewModel.selectNativeJunction("north_in")
+        viewModel.deleteSelectedNativeObject()
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J1"])
+    }
+
+    func testNativeNetworkEditorUndoRedoRestoresSnapshots() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(50, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        XCTAssertEqual(viewModel.nativeEditor.junctions.count, 2)
+        XCTAssertTrue(viewModel.nativeEditorCanUndo)
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J0"])
+        XCTAssertTrue(viewModel.nativeEditorCanRedo)
+
+        viewModel.redoNativeEditorChange()
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J0", "J1"])
+        XCTAssertFalse(viewModel.nativeEditorCanRedo)
+
+        viewModel.selectNativeJunction("J0")
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(7, 9))
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(8, 10))
+        viewModel.finishNativeJunctionMoveGesture()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(8, 10))
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(0, 0))
+    }
+
+    func testNativeNetworkEditorGridSnapAppliesToCanvasAddsAndDragMoves() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.setNativeGridSize(10)
+        viewModel.setNativeSnapToGrid(true)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(6.2, 14.4),
+            junctionID: nil,
+            edgeID: nil
+        ))
+
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(10, 10))
+        XCTAssertEqual(viewModel.nativeEditStatus, "1 junctions, 0 edges, snap 10.0m")
+
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(24.2, 26.1))
+        viewModel.finishNativeJunctionMoveGesture()
+
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(20, 30))
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position, SIMD2<Float>(10, 10))
+
+        viewModel.setNativeSnapToGrid(false)
+        viewModel.moveNativeJunction(id: "J0", to: SIMD2<Float>(24.2, 26.1))
+        viewModel.finishNativeJunctionMoveGesture()
+
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position.x ?? 0, 24.2, accuracy: 0.001)
+        XCTAssertEqual(viewModel.selectedNativeJunction?.position.y ?? 0, 26.1, accuracy: 0.001)
+    }
+
+    func testNativeNetworkEditorAddsMovesAndExportsEdgeGeometryPoints() async throws {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+
+        viewModel.addGeometryPointToSelectedNativeEdge()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [SIMD2<Float>(50, 0)])
+        XCTAssertEqual(viewModel.nativeEdgeGeometryHandles.map(\.id), ["E0:0"])
+
+        viewModel.setNativeSnapToGrid(true)
+        viewModel.setNativeGridSize(10)
+        viewModel.moveNativeEdgeGeometryPoint(edgeID: "E0", pointIndex: 0, to: SIMD2<Float>(43, 18))
+        viewModel.finishNativeEdgeGeometryPointMoveGesture()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [SIMD2<Float>(40, 20)])
+
+        let lane = try XCTUnwrap(viewModel.graph?.lanes.first)
+        let laneShape = Array(try XCTUnwrap(viewModel.graph).laneShape(lane))
+        XCTAssertEqual(laneShape[1], SIMD2<Float>(40, 20))
+
+        let edgeXML = NativeNetworkSUMOWriter.edgeXML(for: viewModel.nativeEditor)
+        XCTAssertTrue(edgeXML.contains(#"shape="0.000,0.000 40.000,20.000 100.000,0.000""#))
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [SIMD2<Float>(50, 0)])
+
+        viewModel.removeLastGeometryPointFromSelectedNativeEdge()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [])
+    }
+
+    func testNativeNetworkEditorDuplicatesAndReversesEdges() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(0, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: nil,
+            edgeID: nil
+        ))
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+        viewModel.addGeometryPointToSelectedNativeEdge()
+        viewModel.moveNativeEdgeGeometryPoint(edgeID: "E0", pointIndex: 0, to: SIMD2<Float>(40, 20))
+        viewModel.finishNativeEdgeGeometryPointMoveGesture()
+
+        viewModel.duplicateSelectedNativeEdge()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.id, "E1")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "J0")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J1")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [SIMD2<Float>(40, 20)])
+
+        viewModel.reverseSelectedNativeEdge()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.id, "E2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "J1")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J0")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.geometryPoints, [SIMD2<Float>(40, 20)])
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), ["E0", "E1", "E2"])
+        XCTAssertEqual(viewModel.graph?.lanes.count, 3)
+
+        let edgeXML = NativeNetworkSUMOWriter.edgeXML(for: viewModel.nativeEditor)
+        XCTAssertTrue(edgeXML.contains(#"id="E1" from="J0" to="J1""#))
+        XCTAssertTrue(edgeXML.contains(#"id="E2" from="J1" to="J0""#))
+        XCTAssertTrue(edgeXML.contains(#"shape="100.000,0.000 40.000,20.000 0.000,0.000""#))
+
+        viewModel.reverseSelectedNativeEdge()
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), ["E0", "E1", "E2"])
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), ["E0", "E1"])
+    }
+
+    func testNativeNetworkEditorEditsJunctionRadiusAndEdgeEndpoints() async throws {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        for position in [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(100, 0),
+            SIMD2<Float>(40, 50),
+        ] {
+            viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+                worldPosition: position,
+                junctionID: nil,
+                edgeID: nil
+            ))
+        }
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+
+        viewModel.selectNativeJunction("J0")
+        viewModel.setSelectedNativeJunctionRadius(12.5)
+        XCTAssertEqual(viewModel.selectedNativeJunction?.radius ?? 0, 12.5, accuracy: 0.001)
+
+        let junction = try XCTUnwrap(viewModel.graph?.junctions.first { $0.id == "J0" })
+        let shape = Array(try XCTUnwrap(viewModel.graph).junctionShape(junction))
+        XCTAssertEqual(shape[0], SIMD2<Float>(-12.5, -12.5))
+        XCTAssertEqual(shape[2], SIMD2<Float>(12.5, 12.5))
+
+        viewModel.selectNativeEdge("E0")
+        viewModel.setSelectedNativeEdgeFromJunction("J2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "J2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J1")
+        XCTAssertEqual(viewModel.graph?.edges.first?.fromJunction, "J2")
+
+        viewModel.setSelectedNativeEdgeToJunction("J2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J1")
+        XCTAssertEqual(viewModel.runtimeMessage, "Edge endpoints must be different.")
+
+        viewModel.setSelectedNativeEdgeToJunction("J0")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "J2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J0")
+
+        let nodeXML = NativeNetworkSUMOWriter.nodeXML(for: viewModel.nativeEditor)
+        let edgeXML = NativeNetworkSUMOWriter.edgeXML(for: viewModel.nativeEditor)
+        XCTAssertTrue(nodeXML.contains(#"<node id="J0" x="0.000" y="0.000" type="priority" radius="12.500"/>"#))
+        XCTAssertTrue(edgeXML.contains(#"<edge id="E0" from="J2" to="J0""#))
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.selectedNativeEdge?.fromJunctionID, "J2")
+        XCTAssertEqual(viewModel.selectedNativeEdge?.toJunctionID, "J1")
+    }
+
+    func testNativeNetworkEditorShiftSelectsAndDeletesMultipleObjects() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        for position in [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(100, 0),
+            SIMD2<Float>(200, 0),
+        ] {
+            viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+                worldPosition: position,
+                junctionID: nil,
+                edgeID: nil
+            ))
+        }
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(200, 0),
+            junctionID: "J2",
+            edgeID: nil
+        ))
+
+        viewModel.setNativeEditTool(.select)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(200, 0),
+            junctionID: "J2",
+            edgeID: nil,
+            extendsSelection: true
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: nil,
+            edgeID: "E1",
+            extendsSelection: true
+        ))
+
+        XCTAssertEqual(viewModel.nativeEditor.selectedJunctionIDs, ["J0", "J2"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedEdgeIDs, ["E1"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedObjectCount, 3)
+        XCTAssertEqual(viewModel.selectedEdgeIDs, ["E1"])
+        XCTAssertEqual(viewModel.selectedNativeEdge?.id, "E1")
+
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(200, 0),
+            junctionID: "J2",
+            edgeID: nil,
+            extendsSelection: true
+        ))
+        XCTAssertEqual(viewModel.nativeEditor.selectedJunctionIDs, ["J0"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedEdgeIDs, ["E1"])
+
+        viewModel.deleteSelectedNativeObject()
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J1", "J2"])
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), [])
+        XCTAssertEqual(viewModel.nativeEditor.selectedObjectCount, 0)
+        XCTAssertEqual(viewModel.selectedEdgeIDs, [])
+        XCTAssertEqual(viewModel.runtimeMessage, "Deleted 1 junction and 2 edges.")
+
+        viewModel.undoNativeEditorChange()
+        XCTAssertEqual(viewModel.nativeEditor.junctions.map(\.id), ["J0", "J1", "J2"])
+        XCTAssertEqual(viewModel.nativeEditor.edges.map(\.id), ["E0", "E1"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedJunctionIDs, ["J0"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedEdgeIDs, ["E1"])
+    }
+
+    func testNativeNetworkEditorRubberBandSelectsObjectsInWorldBounds() async {
+        let viewModel = SimulationViewModel()
+
+        await viewModel.beginNativeNetworkEditing()
+        for position in [
+            SIMD2<Float>(0, 0),
+            SIMD2<Float>(100, 0),
+            SIMD2<Float>(200, 0),
+        ] {
+            viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+                worldPosition: position,
+                junctionID: nil,
+                edgeID: nil
+            ))
+        }
+        viewModel.setNativeEditTool(.edge)
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: .zero,
+            junctionID: "J0",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(100, 0),
+            junctionID: "J1",
+            edgeID: nil
+        ))
+        viewModel.handleNativeNetworkCanvasClick(NativeNetworkCanvasClick(
+            worldPosition: SIMD2<Float>(200, 0),
+            junctionID: "J2",
+            edgeID: nil
+        ))
+
+        viewModel.selectNativeObjects(NativeNetworkRubberBandSelection(
+            worldBounds: SIMD4<Float>(40, -10, 60, 10),
+            extendsSelection: false
+        ))
+        XCTAssertEqual(viewModel.nativeEditor.selectedJunctionIDs, [])
+        XCTAssertEqual(viewModel.nativeEditor.selectedEdgeIDs, ["E0"])
+        XCTAssertEqual(viewModel.selectedEdgeIDs, ["E0"])
+        XCTAssertEqual(viewModel.runtimeMessage, "Selected 0 junctions and 1 edge.")
+
+        viewModel.selectNativeObjects(NativeNetworkRubberBandSelection(
+            worldBounds: SIMD4<Float>(190, -10, 210, 10),
+            extendsSelection: true
+        ))
+        XCTAssertEqual(viewModel.nativeEditor.selectedJunctionIDs, ["J2"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedEdgeIDs, ["E0", "E1"])
+        XCTAssertEqual(viewModel.nativeEditor.selectedObjectCount, 3)
+
+        viewModel.selectNativeObjects(NativeNetworkRubberBandSelection(
+            worldBounds: SIMD4<Float>(300, -10, 320, 10),
+            extendsSelection: false
+        ))
+        XCTAssertEqual(viewModel.nativeEditor.selectedObjectCount, 0)
+        XCTAssertEqual(viewModel.selectedEdgeIDs, [])
+    }
+
     func testScreenshotExportRequestLifecycleReportsSuccess() throws {
         let viewModel = SimulationViewModel()
         let url = URL(fileURLWithPath: "/tmp/sumogui-screenshot.png")

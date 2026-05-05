@@ -85,6 +85,7 @@ For dissertation experiments, a scheduler/controller can run in a separate proce
 | TraCI bytes | `SumoKit/Backend/TraCIWire.swift` | unit-tested against captured fixtures |
 | TraCI commands | `SumoKit/Backend/Domains/*.swift` | one file per domain |
 | `.net.xml` | `SumoKit/Net/NetXMLParser.swift` + `NetGraph.swift` | quadtree in `SumoKit/Net/Quadtree.swift`; graph builds lane/edge/junction indexes |
+| Native editing | `SumoGUIMac/ViewModels/SimulationViewModel.swift` for now | clean-room draft model with undo/redo; extract to editor-specific files next |
 | Metal pipelines | `SumoGUIMac/Render/NetworkRenderer.swift` + `Shaders.metal` | instanced draw calls |
 | Hit-testing | `SumoGUIMac/Render/Picker.swift` | id-buffer pass on a 1×1 scissor |
 | Color schemes | `SumoGUIMac/Render/ColorScheme.swift` | mirrors `GUIColorScheme.cpp` |
@@ -101,3 +102,7 @@ For dissertation experiments, a scheduler/controller can run in a separate proce
 2. Open the matching file from the table above (or create it under the right folder).
 3. Add a unit test in `Tests/SumoKitTests/` if it's engine code.
 4. Tick the box, add a CHANGELOG line.
+
+For native editor work, read `EDITOR_PARITY_PLAN.md` first. The editor must stay
+clean-room unless the project explicitly accepts EPL-covered code in an isolated
+module.

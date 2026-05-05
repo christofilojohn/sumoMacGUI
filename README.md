@@ -89,6 +89,10 @@ sumo -c path/to/scenario.sumocfg --remote-port 8813 --num-clients 2
 
 Your controller and SumoGUIMac should use different TraCI client orders. The app loads the matching `.sumocfg`/`.net.xml` for geometry, then attaches as a viewer client.
 
+To edit or create scenarios with SUMO's official editor, use **File > Open Current in NetEdit**, **File > Open File in NetEdit...**, or **File > New Network in NetEdit**. This launches the user-installed `netedit` binary beside SUMO; full native editing is planned as a later clean-room port.
+
+The first native editing slice is also available under **File > New Native Network Draft**. It lets you add junctions, connect them with edges on the canvas, drag junctions, Shift-click or drag a selection box to multi-select, add and drag edge bend points, edit edge endpoints, tune junction radius or custom junction shape points, duplicate/reverse edges, toggle grid snapping, undo/redo edits, adjust core junction/edge attributes, preview the result in Metal, and export SUMO-compatible `.nod.xml` / `.edg.xml` sources plus a compiled `.net.xml` when `netconvert` is installed.
+
 ## Tests
 
 ```sh

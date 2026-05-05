@@ -10,13 +10,43 @@ public struct SumoLauncher {
     }
 
     public static func locateBinary() -> URL? {
+        locateTool(named: "sumo")
+    }
+
+    public static func locateTool(named executableName: String) -> URL? {
+        if let path = executableInPATH(named: executableName) {
+            return path
+        }
+        if let sumoHome = ProcessInfo.processInfo.environment["SUMO_HOME"] {
+            let root = URL(fileURLWithPath: sumoHome)
+            let candidates = [
+                root.appendingPathComponent("bin").appendingPathComponent(executableName),
+                root.deletingLastPathComponent().appendingPathComponent("bin").appendingPathComponent(executableName),
+                root.deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("bin").appendingPathComponent(executableName),
+            ]
+            for path in candidates where FileManager.default.isExecutableFile(atPath: path.path) {
+                return path
+            }
+        }
         let candidates = [
-            "/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO/bin/sumo",
-            "/opt/homebrew/bin/sumo",
-            "/usr/local/bin/sumo",
+            "/Library/Frameworks/EclipseSUMO.framework/Versions/Current/EclipseSUMO/bin/\(executableName)",
+            "/opt/homebrew/bin/\(executableName)",
+            "/usr/local/bin/\(executableName)",
         ]
         for path in candidates where FileManager.default.isExecutableFile(atPath: path) {
             return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    private static func executableInPATH(named executableName: String) -> URL? {
+        guard executableName.contains("/") == false else { return nil }
+        let pathValue = ProcessInfo.processInfo.environment["PATH"] ?? ""
+        for directory in pathValue.split(separator: ":") {
+            let path = URL(fileURLWithPath: String(directory)).appendingPathComponent(executableName)
+            if FileManager.default.isExecutableFile(atPath: path.path) {
+                return path
+            }
         }
         return nil
     }

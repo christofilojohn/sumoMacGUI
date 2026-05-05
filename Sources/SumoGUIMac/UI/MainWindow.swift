@@ -32,6 +32,22 @@ struct MainWindow: View {
                     Label("Attach", systemImage: "link")
                 }
                 Button {
+                    simulation.openCurrentDocumentInNetEdit()
+                } label: {
+                    Label("NetEdit", systemImage: "pencil.and.ruler")
+                }
+                .disabled(simulation.sourceURL == nil)
+                Button {
+                    Task {
+                        await simulation.beginNativeNetworkEditingFromCurrentOrNew()
+                    }
+                } label: {
+                    Label(
+                        simulation.nativeNetworkEditingEnabled ? "Editing" : "Native Edit",
+                        systemImage: "point.topleft.down.curvedto.point.bottomright.up"
+                    )
+                }
+                Button {
                     viewport.requestFit()
                 } label: {
                     Label("Fit", systemImage: "arrow.up.left.and.down.right.magnifyingglass")
@@ -118,6 +134,7 @@ private struct NetworkWorkspace: View {
                     selectedVehicleID: simulation.selectedVehicleID,
                     selectedEdgeIDs: simulation.selectedEdgeIDs,
                     selectedVehicleIDs: simulation.selectedVehicleIDs,
+                    selectedJunctionIDs: simulation.nativeNetworkEditingEnabled ? simulation.nativeEditor.selectedJunctionIDs : [],
                     selectedRouteEdgeIDs: simulation.selectedVehicleRouteEdgeIDs,
                     hoveredRouteEdgeIDs: simulation.previewRouteEdgeIDs,
                     laneColorMode: simulation.laneColorMode,
@@ -129,12 +146,25 @@ private struct NetworkWorkspace: View {
                     showPOIs: simulation.showPOIs,
                     backgroundDecal: simulation.activeBackgroundDecal,
                     palette: simulation.visualizationPalette,
+                    nativeEditTool: simulation.nativeNetworkEditingEnabled ? simulation.nativeEditTool : nil,
+                    nativeEdgeGeometryHandles: simulation.nativeEdgeGeometryHandles,
+                    nativeJunctionShapeHandles: simulation.nativeJunctionShapeHandles,
                     screenshotExportRequest: simulation.screenshotExportRequest,
                     onScreenshotExportCompleted: simulation.completeScreenshotExport,
                     onVisibleWorldBoundsChanged: simulation.updateVisibleWorldBounds,
                     onVehiclePicked: simulation.selectVehicle,
                     onVehicleHovered: simulation.hoverVehicle,
-                    onEdgePicked: simulation.setSelectedEdge
+                    onEdgePicked: simulation.setSelectedEdge,
+                    onNativeEditClick: simulation.handleNativeNetworkCanvasClick,
+                    onNativeRubberBandSelection: simulation.selectNativeObjects,
+                    onNativeJunctionMoved: simulation.moveNativeJunction,
+                    onNativeJunctionMoveEnded: simulation.finishNativeJunctionMoveGesture,
+                    onNativeEdgeGeometryPointMoved: simulation.moveNativeEdgeGeometryPoint,
+                    onNativeEdgeGeometryPointMoveEnded: simulation.finishNativeEdgeGeometryPointMoveGesture,
+                    onNativeJunctionShapePointMoved: simulation.moveNativeJunctionShapePoint,
+                    onNativeJunctionShapePointMoveEnded: simulation.finishNativeJunctionShapePointMoveGesture,
+                    onNativeDelete: simulation.deleteSelectedNativeObject,
+                    onNativeCancel: simulation.clearNativePendingEdge
                 )
                     .ignoresSafeArea()
                 if simulation.graph == nil {
@@ -145,6 +175,9 @@ private struct NetworkWorkspace: View {
                         .padding(14)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 }
+            }
+            if simulation.nativeNetworkEditingEnabled {
+                NativeEditorBar()
             }
             TransportBar()
         }
@@ -189,6 +222,16 @@ private struct EmptyNetworkState: View {
                         .font(.title3)
                 }
                 .buttonStyle(.bordered)
+
+                Button {
+                    Task {
+                        await simulation.beginNativeNetworkEditing()
+                    }
+                } label: {
+                    Label("New Network", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
+                        .font(.title3)
+                }
+                .buttonStyle(.bordered)
             }
 
             Text("Open a .sumocfg or .net.xml file to inspect its network.")
@@ -211,11 +254,57 @@ private struct ObjectSidebar: View {
                 StatRow(title: "Polygons", value: simulation.graph?.polygons.count ?? 0, icon: "hexagon")
                 StatRow(title: "POIs", value: simulation.graph?.pois.count ?? 0, icon: "mappin")
             }
+            if simulation.nativeNetworkEditingEnabled {
+                Section("Native Edit") {
+                    ForEach(simulation.nativeEditor.junctions) { junction in
+                        Button {
+                            simulation.selectNativeJunction(junction.id)
+                        } label: {
+                            Label(junction.id, systemImage: "smallcircle.filled.circle")
+                                .lineLimit(1)
+                        }
+                        .buttonStyle(.plain)
+                        .contentShape(Rectangle())
+                        .listRowBackground(
+                            simulation.nativeEditor.selectedJunctionIDs.contains(junction.id)
+                                ? Color.accentColor.opacity(0.18)
+                                : Color.clear
+                        )
+                        .contextMenu {
+                            Button {
+                                simulation.selectNativeJunction(junction.id)
+                            } label: {
+                                Label("Select Junction", systemImage: "scope")
+                            }
+
+                            Button {
+                                simulation.selectNativeJunction(junction.id, extending: true)
+                            } label: {
+                                Label(
+                                    simulation.nativeEditor.selectedJunctionIDs.contains(junction.id) ? "Remove from Selection" : "Add to Selection",
+                                    systemImage: simulation.nativeEditor.selectedJunctionIDs.contains(junction.id) ? "minus.circle" : "plus.circle"
+                                )
+                            }
+
+                            Button {
+                                simulation.selectNativeJunction(junction.id)
+                                simulation.deleteSelectedNativeObject()
+                            } label: {
+                                Label("Delete Junction", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
             if let graph = simulation.graph {
                 Section("Edges") {
                     ForEach(Array(graph.edges.prefix(80).enumerated()), id: \.offset) { _, edge in
                         Button {
-                            simulation.selectEdge(edge.id)
+                            if simulation.nativeNetworkEditingEnabled {
+                                simulation.selectNativeEdge(edge.id)
+                            } else {
+                                simulation.selectEdge(edge.id)
+                            }
                         } label: {
                             Label(edge.id, systemImage: edgeIconName(edgeFunction: edge.function))
                                 .lineLimit(1)
@@ -267,19 +356,43 @@ private struct ObjectSidebar: View {
 
     @ViewBuilder
     private func edgeContextMenu(edgeID: String) -> some View {
-        Button {
-            simulation.setSelectedEdge(edgeID)
-        } label: {
-            Label("Select Edge", systemImage: "scope")
-        }
+        if simulation.nativeNetworkEditingEnabled {
+            Button {
+                simulation.selectNativeEdge(edgeID)
+            } label: {
+                Label("Select Edge", systemImage: "scope")
+            }
 
-        Button {
-            simulation.toggleEdgeSelection(edgeID)
-        } label: {
-            Label(
-                simulation.selectedEdgeIDs.contains(edgeID) ? "Remove from Selection" : "Add to Selection",
-                systemImage: simulation.selectedEdgeIDs.contains(edgeID) ? "minus.circle" : "plus.circle"
-            )
+            Button {
+                simulation.selectNativeEdge(edgeID, extending: true)
+            } label: {
+                Label(
+                    simulation.nativeEditor.selectedEdgeIDs.contains(edgeID) ? "Remove from Selection" : "Add to Selection",
+                    systemImage: simulation.nativeEditor.selectedEdgeIDs.contains(edgeID) ? "minus.circle" : "plus.circle"
+                )
+            }
+
+            Button {
+                simulation.selectNativeEdge(edgeID)
+                simulation.deleteSelectedNativeObject()
+            } label: {
+                Label("Delete Edge", systemImage: "trash")
+            }
+        } else {
+            Button {
+                simulation.setSelectedEdge(edgeID)
+            } label: {
+                Label("Select Edge", systemImage: "scope")
+            }
+
+            Button {
+                simulation.toggleEdgeSelection(edgeID)
+            } label: {
+                Label(
+                    simulation.selectedEdgeIDs.contains(edgeID) ? "Remove from Selection" : "Add to Selection",
+                    systemImage: simulation.selectedEdgeIDs.contains(edgeID) ? "minus.circle" : "plus.circle"
+                )
+            }
         }
 
         Button {
@@ -444,7 +557,10 @@ private struct ParametersInspector: View {
                 Metric("Vehicles", simulation.liveState.vehicles.count)
             }
 
-            if let selected = simulation.liveState.selectedVehicle {
+            if simulation.nativeNetworkEditingEnabled {
+                Divider()
+                NativeEditorDetailsView()
+            } else if let selected = simulation.liveState.selectedVehicle {
                 Divider()
                 VehicleDetailsView(details: selected)
             } else if let selectedVehicleID = simulation.selectedVehicleID {
@@ -740,6 +856,280 @@ private struct EdgeDetailsView: View {
     private var boundsText: String? {
         guard let bounds = details.bounds else { return nil }
         return String(format: "%.0f, %.0f - %.0f, %.0f", bounds.x, bounds.y, bounds.z, bounds.w)
+    }
+}
+
+private struct NativeEditorDetailsView: View {
+    @EnvironmentObject private var simulation: SimulationViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(nativeTitle)
+                .font(.headline)
+                .lineLimit(2)
+
+            Grid(alignment: .leading, horizontalSpacing: 14, verticalSpacing: 8) {
+                DetailMetric("Tool", simulation.nativeEditTool.title)
+                DetailMetric("Junctions", String(simulation.nativeEditor.junctions.count))
+                DetailMetric("Edges", String(simulation.nativeEditor.edges.count))
+                DetailMetric("Selected junction", simulation.nativeEditor.selectedJunctionID)
+                DetailMetric("Selected edge", simulation.nativeEditor.selectedEdgeID)
+                DetailMetric("Selected objects", String(simulation.nativeEditor.selectedObjectCount))
+                DetailMetric("Pending edge", simulation.nativeEditor.pendingEdgeStartJunctionID)
+            }
+
+            if simulation.selectedNativeJunction != nil {
+                Divider()
+                NativeJunctionEditor()
+            } else if simulation.selectedNativeEdge != nil {
+                Divider()
+                NativeEdgeEditor()
+            }
+        }
+    }
+
+    private var nativeTitle: String {
+        if let selectedJunctionID = simulation.nativeEditor.selectedJunctionID {
+            return selectedJunctionID
+        }
+        if let selectedEdgeID = simulation.nativeEditor.selectedEdgeID {
+            return selectedEdgeID
+        }
+        return "Native editor"
+    }
+}
+
+private struct NativeJunctionEditor: View {
+    @EnvironmentObject private var simulation: SimulationViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Junction")
+                .font(.subheadline.weight(.semibold))
+
+            TextField("ID", text: Binding(
+                get: { simulation.selectedNativeJunction?.id ?? "" },
+                set: simulation.setSelectedNativeJunctionID
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            TextField("Type", text: Binding(
+                get: { simulation.selectedNativeJunction?.type ?? "" },
+                set: simulation.setSelectedNativeJunctionType
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("x")
+                        .foregroundStyle(.secondary)
+                    TextField("x", value: Binding(
+                        get: { simulation.selectedNativeJunction?.position.x ?? 0 },
+                        set: { simulation.setSelectedNativeJunctionPosition(axis: 0, value: $0) }
+                    ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .monospacedDigit()
+                }
+
+                GridRow {
+                    Text("y")
+                        .foregroundStyle(.secondary)
+                    TextField("y", value: Binding(
+                        get: { simulation.selectedNativeJunction?.position.y ?? 0 },
+                        set: { simulation.setSelectedNativeJunctionPosition(axis: 1, value: $0) }
+                    ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .monospacedDigit()
+                }
+
+                GridRow {
+                    Text("Radius")
+                        .foregroundStyle(.secondary)
+                    TextField("m", value: Binding(
+                        get: { simulation.selectedNativeJunction?.radius ?? NativeNetworkJunction.defaultRadius },
+                        set: simulation.setSelectedNativeJunctionRadius
+                    ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .monospacedDigit()
+                }
+            }
+
+            Divider()
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                DetailMetric("Shape points", String(simulation.selectedNativeJunction?.shapePoints.count ?? 0))
+            }
+
+            HStack(spacing: 8) {
+                Button(simulation.selectedNativeJunction?.hasCustomShape == true ? "Add Point" : "Customize Shape") {
+                    if simulation.selectedNativeJunction?.hasCustomShape == true {
+                        simulation.addShapePointToSelectedNativeJunction()
+                    } else {
+                        simulation.customizeSelectedNativeJunctionShape()
+                    }
+                }
+
+                Button("Remove Point") {
+                    simulation.removeLastShapePointFromSelectedNativeJunction()
+                }
+                .disabled((simulation.selectedNativeJunction?.shapePoints.count ?? 0) <= 3)
+            }
+
+            Button("Reset Shape") {
+                simulation.resetSelectedNativeJunctionShape()
+            }
+            .disabled(simulation.selectedNativeJunction?.hasCustomShape != true)
+        }
+    }
+}
+
+private struct NativeEdgeEditor: View {
+    @EnvironmentObject private var simulation: SimulationViewModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Edge")
+                .font(.subheadline.weight(.semibold))
+
+            TextField("ID", text: Binding(
+                get: { simulation.selectedNativeEdge?.id ?? "" },
+                set: simulation.setSelectedNativeEdgeID
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("From")
+                        .foregroundStyle(.secondary)
+                    Picker("From", selection: Binding(
+                        get: { simulation.selectedNativeEdge?.fromJunctionID ?? "" },
+                        set: simulation.setSelectedNativeEdgeFromJunction
+                    )) {
+                        ForEach(simulation.nativeEditor.junctions) { junction in
+                            Text(junction.id).tag(junction.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+
+                GridRow {
+                    Text("To")
+                        .foregroundStyle(.secondary)
+                    Picker("To", selection: Binding(
+                        get: { simulation.selectedNativeEdge?.toJunctionID ?? "" },
+                        set: simulation.setSelectedNativeEdgeToJunction
+                    )) {
+                        ForEach(simulation.nativeEditor.junctions) { junction in
+                            Text(junction.id).tag(junction.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                }
+            }
+
+            Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
+                GridRow {
+                    Text("Priority")
+                        .foregroundStyle(.secondary)
+                    Stepper(value: Binding(
+                        get: { Int(simulation.selectedNativeEdge?.priority ?? 1) },
+                        set: { simulation.setSelectedNativeEdgePriority(Int16(max(Int(Int16.min), min(Int(Int16.max), $0)))) }
+                    ), in: Int(Int16.min)...Int(Int16.max)) {
+                        Text("\(Int(simulation.selectedNativeEdge?.priority ?? 1))")
+                            .monospacedDigit()
+                    }
+                }
+
+                GridRow {
+                    Text("Lanes")
+                        .foregroundStyle(.secondary)
+                    Stepper(value: Binding(
+                        get: { simulation.selectedNativeEdge?.laneCount ?? 1 },
+                        set: simulation.setSelectedNativeEdgeLaneCount
+                    ), in: 1...12) {
+                        Text("\(simulation.selectedNativeEdge?.laneCount ?? 1)")
+                            .monospacedDigit()
+                    }
+                }
+
+                GridRow {
+                    Text("Speed")
+                        .foregroundStyle(.secondary)
+                    TextField("m/s", value: Binding(
+                        get: { simulation.selectedNativeEdge?.speed ?? 13.89 },
+                        set: simulation.setSelectedNativeEdgeSpeed
+                    ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .monospacedDigit()
+                }
+
+                GridRow {
+                    Text("Width")
+                        .foregroundStyle(.secondary)
+                    TextField("m", value: Binding(
+                        get: { simulation.selectedNativeEdge?.laneWidth ?? 3.2 },
+                        set: simulation.setSelectedNativeEdgeLaneWidth
+                    ), format: .number.precision(.fractionLength(2)))
+                    .textFieldStyle(.roundedBorder)
+                    .monospacedDigit()
+                }
+            }
+
+            TextField("Spread type", text: Binding(
+                get: { simulation.selectedNativeEdge?.spreadType ?? "right" },
+                set: simulation.setSelectedNativeEdgeSpreadType
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            TextField("Allowed vehicle classes", text: Binding(
+                get: { simulation.selectedNativeEdge?.allow ?? "" },
+                set: simulation.setSelectedNativeEdgeAllow
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            TextField("Disallowed vehicle classes", text: Binding(
+                get: { simulation.selectedNativeEdge?.disallow ?? "" },
+                set: simulation.setSelectedNativeEdgeDisallow
+            ))
+            .textFieldStyle(.roundedBorder)
+
+            HStack(spacing: 8) {
+                Button {
+                    simulation.addGeometryPointToSelectedNativeEdge()
+                } label: {
+                    Label("Add Point", systemImage: "plus")
+                }
+                .help("Add a geometry point to the longest segment")
+
+                Button {
+                    simulation.removeLastGeometryPointFromSelectedNativeEdge()
+                } label: {
+                    Label("Remove Point", systemImage: "minus")
+                }
+                .disabled((simulation.selectedNativeEdge?.geometryPoints.isEmpty ?? true))
+                .help("Remove the last geometry point")
+            }
+
+            HStack(spacing: 8) {
+                Button {
+                    simulation.duplicateSelectedNativeEdge()
+                } label: {
+                    Label("Duplicate", systemImage: "plus.square.on.square")
+                }
+                .help("Duplicate selected edge")
+
+                Button {
+                    simulation.reverseSelectedNativeEdge()
+                } label: {
+                    Label("Reverse", systemImage: "arrow.left.arrow.right")
+                }
+                .help("Create opposite-direction edge")
+            }
+
+            DetailMetric("Geometry points", String(simulation.selectedNativeEdge?.geometryPoints.count ?? 0))
+        }
     }
 }
 
@@ -1106,6 +1496,100 @@ private struct LegendRow: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }
+    }
+}
+
+private struct NativeEditorBar: View {
+    @EnvironmentObject private var simulation: SimulationViewModel
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Label("Native Edit", systemImage: "pencil.and.ruler")
+                .font(.headline)
+
+            Picker("Tool", selection: $simulation.nativeEditTool) {
+                ForEach(NativeNetworkEditTool.allCases) { tool in
+                    Label(tool.title, systemImage: tool.systemImage).tag(tool)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(width: 300)
+
+            Button {
+                simulation.undoNativeEditorChange()
+            } label: {
+                Image(systemName: "arrow.uturn.backward")
+            }
+            .disabled(!simulation.nativeEditorCanUndo)
+            .help("Undo native editor change")
+
+            Button {
+                simulation.redoNativeEditorChange()
+            } label: {
+                Image(systemName: "arrow.uturn.forward")
+            }
+            .disabled(!simulation.nativeEditorCanRedo)
+            .help("Redo native editor change")
+
+            Toggle(isOn: Binding(
+                get: { simulation.nativeSnapToGrid },
+                set: simulation.setNativeSnapToGrid
+            )) {
+                Image(systemName: "grid")
+            }
+            .toggleStyle(.button)
+            .help("Snap native edits to grid")
+
+            TextField("Grid", value: Binding(
+                get: { simulation.nativeGridSize },
+                set: simulation.setNativeGridSize
+            ), format: .number.precision(.fractionLength(1)))
+            .textFieldStyle(.roundedBorder)
+            .monospacedDigit()
+            .frame(width: 56)
+            .disabled(!simulation.nativeSnapToGrid)
+            .help("Native editor grid size in meters")
+
+            Button {
+                simulation.clearNativePendingEdge()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .disabled(simulation.nativeEditor.pendingEdgeStartJunctionID == nil)
+            .help("Cancel edge")
+
+            Button {
+                simulation.deleteSelectedNativeObject()
+            } label: {
+                Image(systemName: "trash")
+            }
+            .disabled(simulation.nativeEditor.selectedObjectCount == 0)
+            .help("Delete selected native objects")
+
+            Button {
+                simulation.presentNativeNetworkExportPanel()
+            } label: {
+                Image(systemName: "square.and.arrow.down")
+            }
+            .disabled(!simulation.nativeNetworkCanExport)
+            .help("Export native network")
+
+            Button {
+                simulation.finishNativeNetworkEditing()
+            } label: {
+                Image(systemName: "checkmark")
+            }
+            .help("Pause native editing")
+
+            Spacer()
+
+            Text(simulation.nativeEditStatus)
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 14)
+        .frame(height: 40)
+        .background(.bar)
     }
 }
 
