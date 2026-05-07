@@ -143,6 +143,7 @@ struct VisualizationSettingsSnapshot: Equatable, Sendable {
     var laneColorMode: LaneColorMode = .speedLimit
     var vehicleColorMode: VehicleColorMode = .speed
     var junctionColorMode: JunctionColorMode = .type
+    var showLaneDirectionArrows = true
     var showPolygons = true
     var showPOIs = true
     var showBackground = true
@@ -157,7 +158,7 @@ struct VisualizationSettingsSnapshot: Equatable, Sendable {
         let xml = """
         <?xml version="1.0" encoding="UTF-8"?>
         <viewsettings>
-          <streets colorMode="\(laneColorMode.rawValue)"/>
+          <streets colorMode="\(laneColorMode.rawValue)" showDirectionArrows="\(showLaneDirectionArrows)"/>
           <vehicles colorMode="\(vehicleColorMode.rawValue)"/>
           <junctions colorMode="\(junctionColorMode.rawValue)"/>
           <polygons enabled="\(showPolygons)"/>
@@ -209,6 +210,10 @@ private final class VisualizationSettingsXMLParser: NSObject, XMLParserDelegate 
             if let value = attributeDict["colorMode"], let mode = LaneColorMode(rawValue: value) {
                 snapshot.laneColorMode = mode
             }
+            snapshot.showLaneDirectionArrows = parseBool(
+                attributeDict["showDirectionArrows"],
+                defaultValue: snapshot.showLaneDirectionArrows
+            )
         case "vehicles":
             if let value = attributeDict["colorMode"], let mode = VehicleColorMode(rawValue: value) {
                 snapshot.vehicleColorMode = mode

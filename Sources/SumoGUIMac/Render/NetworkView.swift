@@ -20,6 +20,7 @@ struct NetworkView: NSViewRepresentable {
     let junctionColorMode: JunctionColorMode
     let laneOccupancyByID: [String: Float]
     let junctionLoadByID: [String: Int]
+    let showLaneDirectionArrows: Bool
     let showPolygons: Bool
     let showPOIs: Bool
     let backgroundDecal: BackgroundDecal?
@@ -59,6 +60,7 @@ struct NetworkView: NSViewRepresentable {
         view.junctionColorMode = junctionColorMode
         view.laneOccupancyByID = laneOccupancyByID
         view.junctionLoadByID = junctionLoadByID
+        view.showLaneDirectionArrows = showLaneDirectionArrows
         view.showPolygons = showPolygons
         view.showPOIs = showPOIs
         view.backgroundDecal = backgroundDecal
@@ -106,6 +108,7 @@ struct NetworkView: NSViewRepresentable {
         nsView.junctionColorMode = junctionColorMode
         nsView.laneOccupancyByID = laneOccupancyByID
         nsView.junctionLoadByID = junctionLoadByID
+        nsView.showLaneDirectionArrows = showLaneDirectionArrows
         nsView.showPolygons = showPolygons
         nsView.showPOIs = showPOIs
         nsView.backgroundDecal = backgroundDecal
@@ -182,6 +185,7 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var backgroundPipeline: MTLRenderPipelineState?
     private var junctionPipeline: MTLRenderPipelineState?
     private var lanePipeline: MTLRenderPipelineState?
+    private var laneArrowPipeline: MTLRenderPipelineState?
     private var vehiclePipeline: MTLRenderPipelineState?
     private var backgroundTexture: MTLTexture?
     private var backgroundVertexBuffer: MTLBuffer?
@@ -194,6 +198,8 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
     private var junctionVertexCount = 0
     private var laneSegmentBuffer: MTLBuffer?
     private var laneSegmentCount = 0
+    private var laneArrowBuffer: MTLBuffer?
+    private var laneArrowCount = 0
     private var lastLaneLODScale: Float?
     private var vehicleInstanceBuffer: MTLBuffer?
     private var vehicleInstanceCount = 0
@@ -372,6 +378,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         didSet {
             guard junctionColorMode == .load, junctionLoadByID != oldValue else { return }
             rebuildJunctionBuffer()
+            metalView.setNeedsDisplay(bounds)
+        }
+    }
+
+    var showLaneDirectionArrows = true {
+        didSet {
+            guard showLaneDirectionArrows != oldValue else { return }
+            rebuildLaneBuffer()
             metalView.setNeedsDisplay(bounds)
         }
     }
@@ -811,6 +825,22 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
 
         if
             let graph,
+            let pipeline = laneArrowPipeline,
+            let laneArrowBuffer,
+            laneArrowCount > 0,
+            bounds.width > 10,
+            bounds.height > 10
+        {
+            let transform = currentTransform(for: graph)
+            var uniforms = LaneViewportUniforms(transform: transform, viewSize: bounds.size)
+            encoder.setRenderPipelineState(pipeline)
+            encoder.setVertexBuffer(laneArrowBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&uniforms, length: MemoryLayout<LaneViewportUniforms>.stride, index: 1)
+            encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3, instanceCount: laneArrowCount)
+        }
+
+        if
+            let graph,
             let pipeline = vehiclePipeline,
             let vehicleInstanceBuffer,
             vehicleInstanceCount > 0,
@@ -857,6 +887,12 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
             device: device,
             colorPixelFormat: metalView.colorPixelFormat,
             vertexFunction: "laneVertex",
+            fragmentFunction: "laneFragment"
+        )
+        laneArrowPipeline = makeRenderPipeline(
+            device: device,
+            colorPixelFormat: metalView.colorPixelFormat,
+            vertexFunction: "laneArrowVertex",
             fragmentFunction: "laneFragment"
         )
         vehiclePipeline = makeRenderPipeline(
@@ -1206,6 +1242,8 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         guard let graph, let device else {
             laneSegmentBuffer = nil
             laneSegmentCount = 0
+            laneArrowBuffer = nil
+            laneArrowCount = 0
             lastLaneLODScale = nil
             return
         }
@@ -1214,7 +1252,14 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         var hoverSegments: [LaneSegmentInstance] = []
         var routeSegments: [LaneSegmentInstance] = []
         var selectedSegments: [LaneSegmentInstance] = []
+        var arrows: [LaneArrowInstance] = []
+        var hoverArrows: [LaneArrowInstance] = []
+        var routeArrows: [LaneArrowInstance] = []
+        var selectedArrows: [LaneArrowInstance] = []
         segments.reserveCapacity(graph.lanes.count * 2)
+        if showLaneDirectionArrows {
+            arrows.reserveCapacity(graph.lanes.count)
+        }
         for lane in graph.lanes {
             guard lane.edgeIndex >= 0, Int(lane.edgeIndex) < graph.edges.count else {
                 continue
@@ -1259,14 +1304,27 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                     points: SIMD4(previous.x, previous.y, next.x, next.y),
                     style: SIMD4(color.x, color.y, color.z, renderWidth)
                 )
+                let segmentArrows = showLaneDirectionArrows
+                    ? laneArrowInstances(
+                        from: previous,
+                        to: next,
+                        laneScreenWidth: renderWidth * renderScale,
+                        renderScale: renderScale,
+                        laneColor: color
+                    )
+                    : []
                 if isSelected {
                     selectedSegments.append(segment)
+                    selectedArrows.append(contentsOf: segmentArrows)
                 } else if isSelectedRoute {
                     routeSegments.append(segment)
+                    routeArrows.append(contentsOf: segmentArrows)
                 } else if isHoveredRoute {
                     hoverSegments.append(segment)
+                    hoverArrows.append(contentsOf: segmentArrows)
                 } else {
                     segments.append(segment)
+                    arrows.append(contentsOf: segmentArrows)
                 }
                 previous = next
                 index = points.index(after: index)
@@ -1276,14 +1334,67 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
         segments.append(contentsOf: hoverSegments)
         segments.append(contentsOf: routeSegments)
         segments.append(contentsOf: selectedSegments)
+        arrows.append(contentsOf: hoverArrows)
+        arrows.append(contentsOf: routeArrows)
+        arrows.append(contentsOf: selectedArrows)
         laneSegmentCount = segments.count
+        laneArrowCount = arrows.count
         guard segments.isEmpty == false else {
             laneSegmentBuffer = nil
+            laneArrowBuffer = nil
             return
         }
         laneSegmentBuffer = segments.withUnsafeBytes { bytes in
             device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
         }
+        if arrows.isEmpty {
+            laneArrowBuffer = nil
+        } else {
+            laneArrowBuffer = arrows.withUnsafeBytes { bytes in
+                device.makeBuffer(bytes: bytes.baseAddress!, length: bytes.count, options: .storageModeShared)
+            }
+        }
+    }
+
+    private func laneArrowInstances(
+        from start: SIMD2<Float>,
+        to end: SIMD2<Float>,
+        laneScreenWidth: Float,
+        renderScale: Float,
+        laneColor: SIMD3<Float>
+    ) -> [LaneArrowInstance] {
+        let delta = end - start
+        let worldLength = simd_length(delta)
+        guard worldLength.isFinite, worldLength > 0.001 else { return [] }
+
+        let segmentScreenLength = worldLength * renderScale
+        guard LaneDirectionArrows.shouldRender(
+            laneScreenWidth: laneScreenWidth,
+            segmentScreenLength: segmentScreenLength,
+            scale: renderScale
+        ) else {
+            return []
+        }
+
+        let direction = delta / worldLength
+        let metrics = LaneDirectionArrows.arrowScreenMetrics(laneScreenWidth: laneScreenWidth)
+        let color = laneDirectionArrowColor(on: laneColor)
+        return LaneDirectionArrows.placementFractions(segmentScreenLength: segmentScreenLength).map { fraction in
+            let center = start + delta * fraction
+            return LaneArrowInstance(
+                pose: SIMD4(center.x, center.y, direction.x, direction.y),
+                color: color,
+                metrics: SIMD4(metrics.x, metrics.y, 0, 0)
+            )
+        }
+    }
+
+    private func laneDirectionArrowColor(on laneColor: SIMD3<Float>) -> SIMD4<Float> {
+        let luminance = laneColor.x * 0.2126 + laneColor.y * 0.7152 + laneColor.z * 0.0722
+        if luminance > 0.62 {
+            return SIMD4(0.05, 0.06, 0.07, 0.78)
+        }
+        return SIMD4(0.96, 0.98, 1.00, 0.76)
     }
 
     private func laneSegmentColor(
@@ -1626,7 +1737,10 @@ final class NetworkMetalView: NSView, MTKViewDelegate {
                 scale: transform.scale,
                 emphasized: isSelected || isSelectedRoute || isHoveredRoute
             ) else { continue }
-            let renderedHalfWidth = min(max(CGFloat(renderWidth * transform.scale), 0.5), 18) * 0.5
+            let renderedHalfWidth = min(
+                max(CGFloat(renderWidth * transform.scale), CGFloat(RenderLOD.minimumLaneScreenWidth)),
+                CGFloat(RenderLOD.maximumLaneScreenWidth)
+            ) * 0.5
             let pickThreshold = max(CGFloat(8), renderedHalfWidth + 4)
             var previous = transform.point(points[points.startIndex])
             var index = points.index(after: points.startIndex)
@@ -1804,7 +1918,7 @@ private func stableHash(_ value: String) -> UInt32 {
 
 enum RenderLOD {
     static let minimumLaneScreenWidth: Float = 0.5
-    static let maximumLaneScreenWidth: Float = 18
+    static let maximumLaneScreenWidth: Float = 96
     static let minimumVehicleScreenSize: Float = 2
     static let defaultVehicleLength: Float = 5
     static let defaultVehicleWidth: Float = 2
@@ -1848,6 +1962,47 @@ enum RenderLOD {
         }
         let size = SIMD2(length * scale, width * scale)
         return max(size.x, size.y) >= minimumVehicleScreenSize ? size : nil
+    }
+}
+
+enum LaneDirectionArrows {
+    static let minimumLaneScreenWidth: Float = 2.5
+    static let minimumSegmentScreenLength: Float = 34
+    static let endpointInsetScreen: Float = 18
+    static let preferredScreenSpacing: Float = 112
+    static let maximumArrowsPerSegment = 3
+
+    static func shouldRender(laneScreenWidth: Float, segmentScreenLength: Float, scale: Float) -> Bool {
+        guard
+            laneScreenWidth.isFinite,
+            segmentScreenLength.isFinite,
+            scale.isFinite,
+            laneScreenWidth >= minimumLaneScreenWidth,
+            segmentScreenLength >= minimumSegmentScreenLength,
+            scale > 0
+        else {
+            return false
+        }
+        return true
+    }
+
+    static func placementFractions(segmentScreenLength: Float) -> [Float] {
+        guard segmentScreenLength.isFinite, segmentScreenLength >= minimumSegmentScreenLength else { return [] }
+        let usableLength = max(segmentScreenLength - endpointInsetScreen * 2, 1)
+        let arrowCount = min(
+            maximumArrowsPerSegment,
+            max(1, Int((usableLength / preferredScreenSpacing).rounded()))
+        )
+        return (0..<arrowCount).map { index in
+            let offset = endpointInsetScreen + usableLength * (Float(index) + 0.5) / Float(arrowCount)
+            return max(0, min(offset / segmentScreenLength, 1))
+        }
+    }
+
+    static func arrowScreenMetrics(laneScreenWidth: Float) -> SIMD2<Float> {
+        let width = max(6, min(laneScreenWidth * 0.52, 20))
+        let length = max(10, min(laneScreenWidth * 0.85, 32))
+        return SIMD2(length, width)
     }
 }
 
@@ -1935,6 +2090,12 @@ private struct JunctionRenderVertex {
 private struct LaneSegmentInstance {
     var points: SIMD4<Float>
     var style: SIMD4<Float>
+}
+
+private struct LaneArrowInstance {
+    var pose: SIMD4<Float>
+    var color: SIMD4<Float>
+    var metrics: SIMD4<Float>
 }
 
 private struct VehicleInstance {
@@ -2137,6 +2298,12 @@ struct LaneSegmentInstance {
     float4 style;
 };
 
+struct LaneArrowInstance {
+    float4 pose;
+    float4 color;
+    float4 metrics;
+};
+
 struct VehicleInstance {
     float4 pose;
     float4 color;
@@ -2244,7 +2411,7 @@ vertex LaneVertexOut laneVertex(
     const float2 direction = screenEnd - screenStart;
     const float segmentLength = max(length(direction), 0.0001);
     const float2 normal = float2(-direction.y, direction.x) / segmentLength;
-    const float halfWidth = clamp(segment.style.w * scale, 0.5, 18.0) * 0.5;
+    const float halfWidth = clamp(segment.style.w * scale, 0.5, 96.0) * 0.5;
 
     float2 screen;
     switch (vertexID) {
@@ -2271,6 +2438,42 @@ vertex LaneVertexOut laneVertex(
     LaneVertexOut out;
     out.position = screenToClip(screen, size);
     out.color = float4(segment.style.xyz, 1.0);
+    return out;
+}
+
+vertex LaneVertexOut laneArrowVertex(
+    uint vertexID [[vertex_id]],
+    uint instanceID [[instance_id]],
+    const device LaneArrowInstance *arrows [[buffer(0)]],
+    constant LaneViewportUniforms &uniforms [[buffer(1)]]
+) {
+    const LaneArrowInstance arrow = arrows[instanceID];
+    const float2 size = uniforms.viewport.xy;
+    const float2 worldCenter = arrow.pose.xy;
+    const float2 screenCenter = worldToScreen(worldCenter, uniforms);
+    float2 forward = worldToScreen(worldCenter + arrow.pose.zw, uniforms) - screenCenter;
+    const float forwardLength = length(forward);
+    forward = forwardLength > 0.0001 ? forward / forwardLength : float2(1.0, 0.0);
+    const float2 right = float2(-forward.y, forward.x);
+    const float arrowLength = clamp(arrow.metrics.x, 8.0, 22.0);
+    const float arrowWidth = clamp(arrow.metrics.y, 5.0, 14.0);
+
+    float2 screen;
+    switch (vertexID) {
+    case 0:
+        screen = screenCenter + forward * (arrowLength * 0.58);
+        break;
+    case 1:
+        screen = screenCenter - forward * (arrowLength * 0.42) - right * (arrowWidth * 0.5);
+        break;
+    default:
+        screen = screenCenter - forward * (arrowLength * 0.42) + right * (arrowWidth * 0.5);
+        break;
+    }
+
+    LaneVertexOut out;
+    out.position = screenToClip(screen, size);
+    out.color = arrow.color;
     return out;
 }
 

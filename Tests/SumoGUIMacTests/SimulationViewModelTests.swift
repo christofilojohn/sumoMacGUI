@@ -61,6 +61,7 @@ final class SimulationViewModelTests: XCTestCase {
 
         viewModel.stepDelay = 0.25
         XCTAssertEqual(viewModel.playbackDelayNanoseconds(), 250_000_000)
+        XCTAssertEqual(viewModel.playbackLoopDelayNanoseconds(), 250_000_000)
     }
 
     func testDefaultVisualizationModesMatchCurrentRendererBehavior() {
@@ -69,6 +70,7 @@ final class SimulationViewModelTests: XCTestCase {
         XCTAssertEqual(viewModel.laneColorMode, .speedLimit)
         XCTAssertEqual(viewModel.vehicleColorMode, .speed)
         XCTAssertEqual(viewModel.junctionColorMode, .type)
+        XCTAssertTrue(viewModel.showLaneDirectionArrows)
         XCTAssertEqual(LaneColorMode.allCases.map(\.title), ["By Allowed Speed", "By Lane Number", "By Occupancy", "By Edge Type", "Uniform"])
         XCTAssertEqual(VehicleColorMode.allCases.map(\.title), ["By Speed", "By Acceleration", "By Route", "By Type", "By CO2", "By Color Attribute", "Uniform"])
         XCTAssertEqual(JunctionColorMode.allCases.map(\.title), ["By Type", "By Load", "Uniform"])
@@ -79,6 +81,7 @@ final class SimulationViewModelTests: XCTestCase {
         snapshot.laneColorMode = .occupancy
         snapshot.vehicleColorMode = .co2
         snapshot.junctionColorMode = .load
+        snapshot.showLaneDirectionArrows = false
         snapshot.showPolygons = false
         snapshot.backgroundPath = "/tmp/decal.png"
         snapshot.backgroundWorldRect = SIMD4(1, 2, 3, 4)
@@ -89,6 +92,7 @@ final class SimulationViewModelTests: XCTestCase {
         XCTAssertEqual(parsed.laneColorMode, .occupancy)
         XCTAssertEqual(parsed.vehicleColorMode, .co2)
         XCTAssertEqual(parsed.junctionColorMode, .load)
+        XCTAssertFalse(parsed.showLaneDirectionArrows)
         XCTAssertFalse(parsed.showPolygons)
         XCTAssertEqual(parsed.backgroundPath, "/tmp/decal.png")
         XCTAssertEqual(parsed.backgroundWorldRect, SIMD4<Float>(1, 2, 3, 4))

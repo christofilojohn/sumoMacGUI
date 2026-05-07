@@ -53,6 +53,14 @@ final class NetworkRenderLODTests: XCTestCase {
         XCTAssertNil(RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 0.15624))
     }
 
+    func testLaneDisplayWidthKeepsScalingAtCloseZoomUntilLargeCap() {
+        let closeDisplayWidth = RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 10)
+        XCTAssertEqual((closeDisplayWidth ?? 0) * 10, 31, accuracy: 0.001)
+
+        let cappedDisplayWidth = RenderLOD.laneDisplayWorldWidth(worldWidth: 3.2, scale: 40)
+        XCTAssertEqual((cappedDisplayWidth ?? 0) * 40, 95, accuracy: 0.001)
+    }
+
     func testVehicleLODUsesTwoPixelShapeThreshold() {
         XCTAssertNil(RenderLOD.vehicleScreenSize(scale: 0.399))
 
@@ -63,6 +71,35 @@ final class NetworkRenderLODTests: XCTestCase {
         let zoomedSize = RenderLOD.vehicleScreenSize(scale: 2)
         XCTAssertEqual(zoomedSize?.x ?? 0, 10, accuracy: 0.001)
         XCTAssertEqual(zoomedSize?.y ?? 0, 4, accuracy: 0.001)
+    }
+
+    func testLaneDirectionArrowLODRequiresReadableLaneAndSegmentSize() {
+        XCTAssertFalse(LaneDirectionArrows.shouldRender(laneScreenWidth: 2.4, segmentScreenLength: 80, scale: 1))
+        XCTAssertFalse(LaneDirectionArrows.shouldRender(laneScreenWidth: 4, segmentScreenLength: 33.9, scale: 1))
+        XCTAssertTrue(LaneDirectionArrows.shouldRender(laneScreenWidth: 4, segmentScreenLength: 80, scale: 1))
+    }
+
+    func testLaneDirectionArrowPlacementKeepsArrowsAwayFromJunctionEnds() {
+        XCTAssertEqual(LaneDirectionArrows.placementFractions(segmentScreenLength: 20), [])
+
+        let single = LaneDirectionArrows.placementFractions(segmentScreenLength: 80)
+        XCTAssertEqual(single.count, 1)
+        XCTAssertEqual(single[0], 0.5, accuracy: 0.001)
+
+        let repeated = LaneDirectionArrows.placementFractions(segmentScreenLength: 260)
+        XCTAssertEqual(repeated.count, 2)
+        XCTAssertGreaterThan(repeated[0], 0.25)
+        XCTAssertLessThan(repeated[1], 0.75)
+    }
+
+    func testLaneDirectionArrowSizeGrowsButStaysBounded() {
+        let narrow = LaneDirectionArrows.arrowScreenMetrics(laneScreenWidth: 8)
+        XCTAssertEqual(narrow.x, 10, accuracy: 0.001)
+        XCTAssertEqual(narrow.y, 6, accuracy: 0.001)
+
+        let wide = LaneDirectionArrows.arrowScreenMetrics(laneScreenWidth: 80)
+        XCTAssertEqual(wide.x, 32, accuracy: 0.001)
+        XCTAssertEqual(wide.y, 20, accuracy: 0.001)
     }
 
     func testSUMOHeadingConvertsToScreenCoordinates() {

@@ -162,6 +162,7 @@ final class SimulationViewModel: ObservableObject {
     @Published var laneColorMode: LaneColorMode = .speedLimit
     @Published var vehicleColorMode: VehicleColorMode = .speed
     @Published var junctionColorMode: JunctionColorMode = .type
+    @Published var showLaneDirectionArrows = true
     @Published var showPolygons = true
     @Published var showPOIs = true
     @Published var showBackground = true
@@ -208,6 +209,7 @@ final class SimulationViewModel: ObservableObject {
     private var lastPlaybackSimTime: Double?
     private var vehicleRouteCache: [String: Set<String>] = [:]
     private var vehicleRouteOrderCache: [String: [String]] = [:]
+    private static let externalPlaybackDelayNanoseconds: UInt64 = 100_000_000
 
     private static let recentDocumentsKey = "SumoGUIMac.recentDocuments"
     private static let maxRecentDocumentCount = 8
@@ -363,7 +365,7 @@ final class SimulationViewModel: ObservableObject {
     }
 
     var junctionLoadByID: [String: Int] {
-        guard let graph, liveState.vehicles.isEmpty == false else { return [:] }
+        guard junctionColorMode == .load, let graph, liveState.vehicles.isEmpty == false else { return [:] }
         var loads: [String: Int] = [:]
         for vehicle in liveState.vehicles {
             guard let nearest = nearestJunction(to: vehicle.position, in: graph), nearest.distanceSquared < 625 else {
@@ -1206,6 +1208,7 @@ final class SimulationViewModel: ObservableObject {
             laneColorMode: laneColorMode,
             vehicleColorMode: vehicleColorMode,
             junctionColorMode: junctionColorMode,
+            showLaneDirectionArrows: showLaneDirectionArrows,
             showPolygons: showPolygons,
             showPOIs: showPOIs,
             showBackground: showBackground,
@@ -1221,6 +1224,7 @@ final class SimulationViewModel: ObservableObject {
         laneColorMode = snapshot.laneColorMode
         vehicleColorMode = snapshot.vehicleColorMode
         junctionColorMode = snapshot.junctionColorMode
+        showLaneDirectionArrows = snapshot.showLaneDirectionArrows
         showPolygons = snapshot.showPolygons
         showPOIs = snapshot.showPOIs
         showBackground = snapshot.showBackground
@@ -1455,6 +1459,10 @@ final class SimulationViewModel: ObservableObject {
 
     func playbackDelayNanoseconds() -> UInt64 {
         UInt64(max(stepDelay, 0.02) * 1_000_000_000)
+    }
+
+    func playbackLoopDelayNanoseconds() -> UInt64 {
+        isExternalTraCIAttached ? Self.externalPlaybackDelayNanoseconds : playbackDelayNanoseconds()
     }
 
     func resetPlaybackSpeed() {
@@ -2043,11 +2051,7 @@ final class SimulationViewModel: ObservableObject {
             while !Task.isCancelled {
                 guard let self, self.isPlaying else { return }
                 await self.stepSimulation()
-                if self.isExternalTraCIAttached {
-                    await Task.yield()
-                } else {
-                    try? await Task.sleep(nanoseconds: self.playbackDelayNanoseconds())
-                }
+                try? await Task.sleep(nanoseconds: self.playbackLoopDelayNanoseconds())
             }
         }
     }

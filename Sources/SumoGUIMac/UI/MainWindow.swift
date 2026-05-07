@@ -142,6 +142,7 @@ private struct NetworkWorkspace: View {
                     junctionColorMode: simulation.junctionColorMode,
                     laneOccupancyByID: simulation.laneOccupancyByID,
                     junctionLoadByID: simulation.junctionLoadByID,
+                    showLaneDirectionArrows: simulation.showLaneDirectionArrows,
                     showPolygons: simulation.showPolygons,
                     showPOIs: simulation.showPOIs,
                     backgroundDecal: simulation.activeBackgroundDecal,
@@ -1346,6 +1347,7 @@ private struct StreetsSettingsTab: View {
                     Text(mode.title).tag(mode)
                 }
             }
+            Toggle("Show Direction Arrows", isOn: $simulation.showLaneDirectionArrows)
             ColorPicker("Uniform Color", selection: paletteBinding(\.laneUniform))
             Toggle("Show Polygons", isOn: $simulation.showPolygons)
             ColorPicker("Polygon Fill", selection: paletteBinding(\.polygonFill), supportsOpacity: true)
@@ -1632,37 +1634,34 @@ private struct TransportBar: View {
             .disabled(!simulation.canFollowSelectedVehicle)
             .help("Follow selected vehicle")
 
-            Menu {
-                Picker("Lane Coloring Scheme", selection: $simulation.laneColorMode) {
-                    ForEach(LaneColorMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
+            Picker(selection: $simulation.laneColorMode) {
+                ForEach(LaneColorMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
                 }
             } label: {
                 Label("Lane Coloring", systemImage: "road.lanes")
             }
+            .pickerStyle(.menu)
             .help("Lane coloring scheme")
 
-            Menu {
-                Picker("Vehicle Coloring Scheme", selection: $simulation.vehicleColorMode) {
-                    ForEach(VehicleColorMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
+            Picker(selection: $simulation.vehicleColorMode) {
+                ForEach(VehicleColorMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
                 }
             } label: {
                 Label("Vehicle Coloring", systemImage: "car.side")
             }
+            .pickerStyle(.menu)
             .help("Vehicle coloring scheme")
 
-            Menu {
-                Picker("Junction Coloring Scheme", selection: $simulation.junctionColorMode) {
-                    ForEach(JunctionColorMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
+            Picker(selection: $simulation.junctionColorMode) {
+                ForEach(JunctionColorMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
                 }
             } label: {
                 Label("Junction Coloring", systemImage: "point.topleft.down.curvedto.point.bottomright.up")
             }
+            .pickerStyle(.menu)
             .help("Junction coloring scheme")
 
             Slider(value: $simulation.stepDelay, in: 0.02...1.0)
