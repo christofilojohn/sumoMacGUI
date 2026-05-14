@@ -77,12 +77,7 @@ public struct SumoLauncher {
         let proc = Process()
         proc.executableURL = binaryPath
         proc.currentDirectoryURL = config.deletingLastPathComponent()
-        proc.arguments = [
-            "--remote-port", String(chosenPort),
-            "-c", config.path,
-            "--no-step-log", "true",
-            "--no-warnings", "true",
-        ] + extraArgs
+        proc.arguments = Self.arguments(config: config, port: chosenPort, extraArgs: extraArgs)
 
         let stderr = Pipe()
         proc.standardError = stderr
@@ -92,6 +87,15 @@ public struct SumoLauncher {
             throw TraCIError.launchFailed(error.localizedDescription)
         }
         return Handle(process: proc, port: chosenPort, stderrPipe: stderr)
+    }
+
+    static func arguments(config: URL, port: Int, extraArgs: [String]) -> [String] {
+        [
+            "--remote-port", String(port),
+            "-c", config.path,
+            "--no-step-log",
+            "--no-warnings",
+        ] + extraArgs
     }
 
     static func findFreePort() -> Int {

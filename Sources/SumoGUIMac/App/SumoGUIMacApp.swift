@@ -7,7 +7,11 @@ struct SumoGUIMacApp: App {
 
     init() {
         let launchConfiguration = LaunchConfiguration.from(arguments: CommandLine.arguments)
-        _simulation = StateObject(wrappedValue: SimulationViewModel(initialOpenURL: launchConfiguration.openURL))
+        _simulation = StateObject(wrappedValue: SimulationViewModel(
+            initialOpenURL: launchConfiguration.openURL,
+            initialTraciPort: launchConfiguration.traciPort,
+            initialTraciClientOrder: launchConfiguration.traciClientOrder
+        ))
     }
 
     var body: some Scene {

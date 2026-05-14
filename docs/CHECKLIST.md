@@ -124,4 +124,4 @@ Legend: `[ ]` todo · `[~]` in progress · `[x]` done · `[-]` deferred to v2
 - **Don't hand-write `.net.xml` for tests.** SUMO validates internal-link geometry strictly and bails before TraCI ever opens. Use `netconvert` to build fixtures from `.nod.xml` + `.edg.xml`. See `Tests/SumoKitTests/Fixtures/tiny.net.xml`.
 - **TraCI response shape is per-command.** Status block (lenByte, cmdID, result, descString) is always present. After it: GET-style commands wrap their payload in a `lenByte+cmdID` echo block; SIMSTEP appends a 4-byte sub-result count + N sub-result blocks; CLOSE has nothing. `sendCommand` returns the bytes after status; each domain method parses its own tail.
 - **`NWConnection` is finicky here.** We use raw `Darwin.socket` + `TCP_NODELAY` to mirror SUMO's Python client; that worked first try.
-- **`--no-step-log true` etc. needs the `true` argument** even though they look boolean. SUMO's option parser accepts `--flag value` form for bool options.
+- **SUMO boolean options can be passed bare.** Prefer `--no-step-log` / `--no-warnings` without `true`; SUMO also accepts `--flag value` form for bool options, but the value is not required.

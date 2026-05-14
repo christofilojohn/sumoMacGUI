@@ -113,6 +113,27 @@ final class ViewportStateTests: XCTestCase {
         XCTAssertGreaterThan(viewport.pointsPerWorldUnit, 0)
     }
 
+    func testZoomStopsAtConfiguredMaximumScale() {
+        let viewport = makeFitted()
+        viewport.setMaximumPointsPerWorldUnit(1.4)
+
+        viewport.zoom(by: 4, anchorWorld: viewport.center)
+        let cappedScale = viewport.pointsPerWorldUnit
+        viewport.zoom(by: 4, anchorWorld: viewport.center)
+
+        XCTAssertEqual(cappedScale, 1.4, accuracy: 0.001)
+        XCTAssertEqual(viewport.pointsPerWorldUnit, cappedScale, accuracy: 0.001)
+    }
+
+    func testLoweringMaximumScaleClampsCurrentScale() {
+        let viewport = makeFitted()
+        viewport.zoom(by: 4, anchorWorld: viewport.center)
+
+        viewport.setMaximumPointsPerWorldUnit(2.5)
+
+        XCTAssertEqual(viewport.pointsPerWorldUnit, 2.5, accuracy: 0.001)
+    }
+
     func testRequestFitClearsConfiguredFlag() {
         let viewport = makeFitted()
         var changeCount = 0

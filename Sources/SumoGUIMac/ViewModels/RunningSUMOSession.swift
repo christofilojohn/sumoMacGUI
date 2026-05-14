@@ -110,13 +110,14 @@ final class RunningSUMOSession {
         port: Int,
         clientOrder: Int32,
         subscriptionAnchorID: String?,
-        vehicleUpdateMode: VehicleUpdateMode = .subscriptions
+        vehicleUpdateMode: VehicleUpdateMode = .subscriptions,
+        connectRetries: Int = 5
     ) async throws -> RunningSUMOSession {
         guard (1...65_535).contains(port) else {
             throw RuntimeError("TraCI port must be between 1 and 65535.")
         }
         let connection = TraCIConnection(host: host, port: port)
-        try await connection.connect(retries: 5, retryDelayMS: 100)
+        try await connection.connect(retries: connectRetries, retryDelayMS: 500)
         let client = TraCIClient(connection: connection)
         try await client.setOrder(clientOrder)
         let version = try await client.getVersion()
@@ -180,13 +181,19 @@ final class RunningSUMOSession {
         if snapshots.isEmpty {
             snapshots = try await pollVehiclesFallback()
         }
+        let pois = try await pollSlotPOIs()
 
         let resolvedSimTime = if let simTime {
             simTime
         } else {
             try await client.simTime()
         }
-        return SimulationState(simTime: resolvedSimTime, vehicles: snapshots, selectedVehicle: selectedVehicleDetails)
+        return SimulationState(
+            simTime: resolvedSimTime,
+            vehicles: snapshots,
+            pois: pois,
+            selectedVehicle: selectedVehicleDetails
+        )
     }
 
     func updateVehicleViewport(anchorID: String, range: Double) async throws {
@@ -296,6 +303,23 @@ final class RunningSUMOSession {
                 angle: Float(angle),
                 speed: Float(speed),
                 typeID: typeID
+            ))
+        }
+        return snapshots
+    }
+
+    private func pollSlotPOIs() async throws -> ContiguousArray<POISnapshot> {
+        let poiIDs = try await client.poiIDs()
+        var snapshots = ContiguousArray<POISnapshot>()
+        let slotIDs = poiIDs.filter { $0.hasPrefix("slot_") || $0.localizedCaseInsensitiveContains("slot") }
+        snapshots.reserveCapacity(slotIDs.count)
+        for id in slotIDs {
+            let position = try await client.poiPosition(id)
+            let color = try? await client.poiColor(id)
+            snapshots.append(POISnapshot(
+                id: id,
+                position: SIMD2(Float(position.x), Float(position.y)),
+                color: color ?? SumoColor(red: 255, green: 64, blue: 64, alpha: 220)
             ))
         }
         return snapshots

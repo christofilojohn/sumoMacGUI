@@ -73,6 +73,79 @@ final class NetworkRenderLODTests: XCTestCase {
         XCTAssertEqual(zoomedSize?.y ?? 0, 4, accuracy: 0.001)
     }
 
+    func testVehicleStrokeContrastsWhenFillMatchesBackground() {
+        let background = SIMD3<Float>(0.12, 0.13, 0.14)
+        let stroke = VehicleIconContrast.strokeColor(fill: background, background: background)
+        let strokeRGB = SIMD3<Float>(stroke.x, stroke.y, stroke.z)
+
+        XCTAssertGreaterThanOrEqual(VehicleIconContrast.contrastRatio(strokeRGB, background), 4.5)
+    }
+
+    func testVehicleStrokePreservesEdgeContrastForLightVehiclesOnDarkMap() {
+        let fill = SIMD3<Float>(0.96, 0.97, 0.94)
+        let background = SIMD3<Float>(0.06, 0.06, 0.07)
+        let stroke = VehicleIconContrast.strokeColor(fill: fill, background: background)
+        let strokeRGB = SIMD3<Float>(stroke.x, stroke.y, stroke.z)
+
+        XCTAssertGreaterThanOrEqual(VehicleIconContrast.contrastRatio(strokeRGB, fill), 4.5)
+    }
+
+    func testVehicleDetailContrastsWithBodyFill() {
+        let fill = SIMD3<Float>(0.36, 0.70, 0.88)
+        let detail = VehicleIconContrast.detailColor(fill: fill)
+        let detailRGB = SIMD3<Float>(detail.x, detail.y, detail.z)
+
+        XCTAssertGreaterThanOrEqual(VehicleIconContrast.contrastRatio(detailRGB, fill), 3.0)
+    }
+
+    func testRenderBufferInvalidationIgnoresTinyScaleChanges() {
+        XCTAssertFalse(RenderBufferInvalidation.scaleChanged(10, 10.1, relativeTolerance: 0.03))
+        XCTAssertTrue(RenderBufferInvalidation.scaleChanged(10, 10.31, relativeTolerance: 0.03))
+    }
+
+    func testVehicleBufferInvalidatesWhenLODThresholdIsCrossed() {
+        XCTAssertTrue(RenderBufferInvalidation.vehicleScaleChanged(0.399, 0.4, relativeTolerance: 0.03))
+    }
+
+    func testVehicleRenderPolicySkipsAnimationWhenVehiclesAreTooDense() {
+        XCTAssertTrue(VehicleRenderPolicy.shouldAnimate(vehicleCount: 500, scale: 1))
+        XCTAssertFalse(
+            VehicleRenderPolicy.shouldAnimate(
+                vehicleCount: VehicleRenderPolicy.maximumAnimatedVehicleCount + 1,
+                scale: 1
+            )
+        )
+    }
+
+    func testVehicleRenderPolicySkipsAnimationWhenVehiclesAreNotVisible() {
+        XCTAssertFalse(VehicleRenderPolicy.shouldAnimate(vehicleCount: 500, scale: 0.1))
+    }
+
+    func testVehicleRenderPolicyDropsAnimationFrameRateForLargeVisibleFleets() {
+        XCTAssertEqual(VehicleRenderPolicy.animationInterval(vehicleCount: 500), 1.0 / 60.0, accuracy: 0.0001)
+        XCTAssertEqual(
+            VehicleRenderPolicy.animationInterval(vehicleCount: VehicleRenderPolicy.reducedAnimationVehicleCount + 1),
+            1.0 / 30.0,
+            accuracy: 0.0001
+        )
+    }
+
+    func testWorldBoundsCoverageAddsPanHeadroom() {
+        let visible = SIMD4<Float>(0, 0, 100, 50)
+        let expanded = WorldBoundsCoverage.expanded(visible, scale: 2, screenPadding: 40)
+
+        XCTAssertTrue(WorldBoundsCoverage.contains(expanded, visible))
+        XCTAssertTrue(WorldBoundsCoverage.contains(expanded, SIMD2<Float>(-20, 75)))
+        XCTAssertFalse(WorldBoundsCoverage.contains(expanded, SIMD2<Float>(-40, 25)))
+    }
+
+    func testMaximumProportionalScaleStopsBeforeLaneWidthCap() {
+        let scale = RenderLOD.maximumProportionalScale(forLaneWidths: [3.2, 3.2, 3.5, 4.0])
+
+        XCTAssertEqual(scale, 24, accuracy: 0.001)
+        XCTAssertLessThan(3.5 * scale, RenderLOD.maximumLaneScreenWidth)
+    }
+
     func testLaneDirectionArrowLODRequiresReadableLaneAndSegmentSize() {
         XCTAssertFalse(LaneDirectionArrows.shouldRender(laneScreenWidth: 2.4, segmentScreenLength: 80, scale: 1))
         XCTAssertFalse(LaneDirectionArrows.shouldRender(laneScreenWidth: 4, segmentScreenLength: 33.9, scale: 1))

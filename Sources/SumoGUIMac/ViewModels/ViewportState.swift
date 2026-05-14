@@ -3,13 +3,31 @@ import SumoKit
 
 @MainActor
 final class ViewportState: ObservableObject {
+    static let defaultMaximumPointsPerWorldUnit: Float = 2_500
+
     private(set) var center = SIMD2<Float>(0, 0)
     private(set) var pointsPerWorldUnit: Float = 1
+    private(set) var maximumPointsPerWorldUnit: Float = ViewportState.defaultMaximumPointsPerWorldUnit
     private(set) var rotationRadians: Float = 0
     private(set) var isConfigured = false
     private var pinchLastMagnification: CGFloat = 1
 
     var onChange: (() -> Void)?
+
+    func setMaximumPointsPerWorldUnit(_ maximum: Float?) {
+        let resolvedMaximum: Float
+        if let maximum, maximum.isFinite, maximum > 0 {
+            resolvedMaximum = max(0.05, maximum)
+        } else {
+            resolvedMaximum = Self.defaultMaximumPointsPerWorldUnit
+        }
+
+        guard abs(maximumPointsPerWorldUnit - resolvedMaximum) > Float.ulpOfOne else { return }
+        maximumPointsPerWorldUnit = resolvedMaximum
+        guard isConfigured, pointsPerWorldUnit > maximumPointsPerWorldUnit else { return }
+        pointsPerWorldUnit = maximumPointsPerWorldUnit
+        onChange?()
+    }
 
     func configureToFit(netBounds: SIMD4<Float>, viewSize: CGSize, inset: Float) {
         let width = max(netBounds.z - netBounds.x, 1)
@@ -18,7 +36,7 @@ final class ViewportState: ObservableObject {
         let availableHeight = max(Float(viewSize.height) - inset * 2, 1)
 
         center = SIMD2((netBounds.x + netBounds.z) * 0.5, (netBounds.y + netBounds.w) * 0.5)
-        pointsPerWorldUnit = min(availableWidth / width, availableHeight / height)
+        pointsPerWorldUnit = min(availableWidth / width, availableHeight / height, maximumPointsPerWorldUnit)
         rotationRadians = 0
         isConfigured = true
         onChange?()
@@ -57,7 +75,8 @@ final class ViewportState: ObservableObject {
     func zoom(by factor: Float, anchorWorld: SIMD2<Float>) {
         guard isConfigured else { return }
         let clampedFactor = max(0.25, min(factor, 4))
-        let newScale = max(0.05, min(pointsPerWorldUnit * clampedFactor, 2_500))
+        let newScale = max(0.05, min(pointsPerWorldUnit * clampedFactor, maximumPointsPerWorldUnit))
+        guard abs(newScale - pointsPerWorldUnit) > Float.ulpOfOne else { return }
         let anchorOffset = anchorWorld - center
         center = anchorWorld - anchorOffset * (pointsPerWorldUnit / newScale)
         pointsPerWorldUnit = newScale

@@ -174,6 +174,12 @@ public extension TraCIClient {
     func poiCount() async throws -> Int32 {
         try await idCount(commandID: DomainCmd.getPOI)
     }
+    func poiPosition(_ id: String) async throws -> SIMD2<Double> {
+        try (await get(commandID: DomainCmd.getPOI, variableID: Var.position, objectID: id)).asPosition2D ?? .zero
+    }
+    func poiColor(_ id: String) async throws -> SumoColor? {
+        try (await get(commandID: DomainCmd.getPOI, variableID: Var.color, objectID: id)).asColor
+    }
     func polygonIDs() async throws -> [String] {
         try await idList(commandID: DomainCmd.getPolygon)
     }

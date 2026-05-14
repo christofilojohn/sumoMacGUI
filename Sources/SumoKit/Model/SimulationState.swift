@@ -3,16 +3,44 @@ import Foundation
 public struct SimulationState: Sendable {
     public var simTime: Double
     public var vehicles: ContiguousArray<VehicleSnapshot>
+    public var pois: ContiguousArray<POISnapshot>
     public var selectedVehicle: VehicleDetails?
 
     public init(
         simTime: Double = 0,
         vehicles: ContiguousArray<VehicleSnapshot> = [],
+        pois: ContiguousArray<POISnapshot> = [],
         selectedVehicle: VehicleDetails? = nil
     ) {
         self.simTime = simTime
         self.vehicles = vehicles
+        self.pois = pois
         self.selectedVehicle = selectedVehicle
+    }
+}
+
+public struct POISnapshot: Sendable, Identifiable {
+    public let id: String
+    public var position: SIMD2<Float>
+    public var color: SumoColor?
+    public var layer: Float
+    public var width: Float
+    public var height: Float
+
+    public init(
+        id: String,
+        position: SIMD2<Float>,
+        color: SumoColor? = nil,
+        layer: Float = 5,
+        width: Float = 2.4,
+        height: Float = 2.4
+    ) {
+        self.id = id
+        self.position = position
+        self.color = color
+        self.layer = layer
+        self.width = width
+        self.height = height
     }
 }
 

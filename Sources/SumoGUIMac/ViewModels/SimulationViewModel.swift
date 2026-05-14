@@ -190,6 +190,8 @@ final class SimulationViewModel: ObservableObject {
     }
 
     private let initialOpenURL: URL?
+    private let initialTraciPort: Int?
+    private let initialTraciClientOrder: Int32
     private let userDefaults: UserDefaults
     private var didAttemptInitialLoad = false
     private var session: RunningSUMOSession?
@@ -217,8 +219,10 @@ final class SimulationViewModel: ObservableObject {
     private static let maxTrackerValueSampleCount = 2_000
     private static let maxNativeEditorHistoryCount = 120
 
-    init(initialOpenURL: URL? = nil, userDefaults: UserDefaults = .standard) {
+    init(initialOpenURL: URL? = nil, initialTraciPort: Int? = nil, initialTraciClientOrder: Int32 = 2, userDefaults: UserDefaults = .standard) {
         self.initialOpenURL = initialOpenURL
+        self.initialTraciPort = initialTraciPort
+        self.initialTraciClientOrder = initialTraciClientOrder
         self.userDefaults = userDefaults
         recentDocuments = Self.loadRecentDocuments(from: userDefaults)
     }
@@ -1256,7 +1260,11 @@ final class SimulationViewModel: ObservableObject {
         didAttemptInitialLoad = true
         guard let initialOpenURL else { return }
         Task { @MainActor in
-            await load(url: initialOpenURL)
+            if let port = initialTraciPort {
+                await attach(url: initialOpenURL, host: "127.0.0.1", port: port, clientOrder: initialTraciClientOrder, connectRetries: 60)
+            } else {
+                await load(url: initialOpenURL)
+            }
         }
     }
 
@@ -1322,7 +1330,7 @@ final class SimulationViewModel: ObservableObject {
         }
     }
 
-    func attach(url: URL, host: String, port: Int, clientOrder: Int32) async {
+    func attach(url: URL, host: String, port: Int, clientOrder: Int32, connectRetries: Int = 5) async {
         await shutdownSession()
         loadState = .loading("Attaching to \(host):\(port)")
         liveState = SimulationState()
@@ -1368,7 +1376,8 @@ final class SimulationViewModel: ObservableObject {
                     port: port,
                     clientOrder: clientOrder,
                     subscriptionAnchorID: parsed.junctions.first?.id,
-                    vehicleUpdateMode: vehicleUpdateMode
+                    vehicleUpdateMode: vehicleUpdateMode,
+                    connectRetries: connectRetries
                 )
                 session = running
                 if let latestViewportBounds {
